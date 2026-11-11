@@ -1,0 +1,19 @@
+# Зависимости voice-сервиса (Python 3.12).
+# Версии не зафиксированы: на целевой машине снимите `pip freeze > requirements.lock`
+# и коммитьте lock-файл — иначе сборка невоспроизводима.
+fastapi
+uvicorn
+numpy
+sherpa-onnx          # ASR T-one CTC (CPU)
+onnxruntime-gpu      # Kokoro-ru (CUDA-провайдер); требует nvidia-cudnn-cu12
+nvidia-cudnn-cu12
+phonemizer
+espeakng-loader
+websockets
+
+# --- отдельное окружение для Silero TTS (.venv-silero) -------------------------
+# torch СТРОГО CPU-сборка: onnxruntime-gpu и torch в одном процессе конфликтуют
+# по CUDA-контекстам и роняют сервис segfault'ом.
+#   python3 -m venv .venv-silero
+#   .venv-silero/bin/pip install torch --index-url https://download.pytorch.org/whl/cpu
+#   .venv-silero/bin/pip install fastapi uvicorn numpy pydantic
