@@ -62,8 +62,12 @@
 
 - `requirements.txt` — зависимости voice-сервиса и отдельного CPU-окружения Silero.
 - `tests/test_tool_history.py` — регрессии на пункты 1 и «двойной EOG» (без GPU, сети
-  и демона: LLM и инструменты подменяются).
-- `.env.example` — добавлен `VOICE_TURN_TIMEOUT` (см. ниже).
+  и демона: LLM и инструменты подменяются; при отсутствии fastapi/uvicorn/numpy
+  тест ставит минимальные заглушки, поэтому запускается и локально, и в CI).
+- `.github/workflows/ci.yml` — `compileall` для `voice/`, `silero/`, `tests/` +
+  запуск регрессий на Python 3.12. Сборка C++ демона в CI намеренно не делается:
+  нужен форк llama.cpp с `PQ2_0` и CUDA.
+- `.env.example` — добавлен `VOICE_TURN_TIMEOUT`.
 
 ## Что НЕ проверено в этом форке
 

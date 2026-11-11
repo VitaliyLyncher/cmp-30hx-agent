@@ -8,9 +8,59 @@ from __future__ import annotations
 
 import asyncio
 import sys
+import types
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+
+def _install_stubs() -> None:
+    """Минимальные заглушки тяжёлых зависимостей.
+
+    Тест проверяет логику Turn.run и не нуждается ни в HTTP-сервере, ни в
+    реальном numpy. Заглушки ставятся ТОЛЬКО если настоящих модулей нет, чтобы
+    на целевой машине тест работал с реальными fastapi/uvicorn/numpy.
+    """
+    try:
+        import fastapi  # noqa: F401
+    except Exception:  # noqa: BLE001
+        fastapi = types.ModuleType("fastapi")
+
+        class _App:
+            def __init__(self, *a, **k) -> None:
+                pass
+
+            def _deco(self, *a, **k):
+                return lambda fn: fn
+
+            get = post = websocket = on_event = _deco
+
+        class WebSocketDisconnect(Exception):
+            pass
+
+        fastapi.FastAPI = _App
+        fastapi.Request = object
+        fastapi.WebSocket = object
+        fastapi.WebSocketDisconnect = WebSocketDisconnect
+        sys.modules["fastapi"] = fastapi
+
+        responses = types.ModuleType("fastapi.responses")
+        responses.HTMLResponse = object
+        responses.JSONResponse = object
+        responses.Response = object
+        sys.modules["fastapi.responses"] = responses
+
+        uvicorn = types.ModuleType("uvicorn")
+        uvicorn.run = lambda *a, **k: None
+        sys.modules["uvicorn"] = uvicorn
+
+    try:
+        import numpy  # noqa: F401
+    except Exception:  # noqa: BLE001
+        sys.modules["numpy"] = types.ModuleType("numpy")
+
+
+_install_stubs()
 
 try:
     from voice import app  # noqa: F401
@@ -100,10 +150,14 @@ async def case_tool_history() -> bool:
     if hist[-1].get("role") != "assistant" or ANSWER not in hist[-1].get("content", ""):
         print("FAIL: последняя запись — не финальный ответ")
         ok = False
-    # второй вызов генерации обязан идти как продолжение (без новой реплики)
-    if len(app.llm.calls) != 2 or app.llm.calls[1]["text"] != "" \
-            or not app.llm.calls[1]["continue"]:
+    # Второй вызов обязан идти как продолжение: клиент помечает continue=True,
+    # а история уже содержит user → assistant(вызов) → tool(результат).
+    second = app.llm.calls[1] if len(app.llm.calls) > 1 else {}
+    if len(app.llm.calls) != 2 or not second.get("continue"):
         print("FAIL: продолжение после инструмента собрано неверно")
+        ok = False
+    elif not second.get("history") or second["history"][-1].get("role") != "tool":
+        print("FAIL: история продолжения не заканчивается результатом инструмента")
         ok = False
     if ok:
         print("OK: tool-раунд сохраняет raw-разметку и порядок user→assistant→tool→assistant")
