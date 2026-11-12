@@ -19,6 +19,28 @@ log = logging.getLogger("voice.wakeword")
 _FRAME = 1280  # 80 мс при 16 кГц — стандартный шаг openWakeWord
 
 
+def _resolve_model_paths(names: list[str]) -> list[str]:
+    """Имена моделей -> пути к .onnx, лежащим внутри пакета openwakeword."""
+    import glob
+    import os
+
+    import openwakeword
+
+    base = os.path.join(os.path.dirname(openwakeword.__file__), "resources", "models")
+    out: list[str] = []
+    for n in names:
+        cand = os.path.join(base, n + ".onnx")
+        if os.path.isfile(cand):
+            out.append(cand)
+            continue
+        hits = sorted(glob.glob(os.path.join(base, n + "*.onnx")))
+        if hits:
+            out.append(hits[0])
+        else:
+            log.warning("модель wake word «%s» не найдена в %s", n, base)
+    return out
+
+
 class WakeWordDetector:
     def __init__(self, model_names: list[str] | None = None, threshold: float = 0.5,
                  model_paths: list[str] | None = None):
@@ -29,13 +51,7 @@ class WakeWordDetector:
         self._buf = np.zeros(0, dtype=np.int16)
         paths = list(model_paths or [])
         if not paths:
-            # openWakeWord 0.4 принимает ТОЛЬКО пути к .onnx/.tflite, а не имена
-            try:
-                from openwakeword.utils import get_pretrained_model_paths
-                paths = list(get_pretrained_model_paths(self._names))
-            except Exception as e:  # noqa: BLE001
-                log.warning("не удалось получить пути моделей wake word: %s", e)
-                paths = []
+            paths = _resolve_model_paths(self._names)
         if not paths:
             raise RuntimeError("модели wake word не найдены")
         self._model = Model(wakeword_model_paths=paths)
@@ -85,10 +101,10 @@ def build_detector():
         return WakeWordDetector([], config.wakeword_threshold(), model_paths=[path])
 
     name = config.wakeword_model().strip() or "hey_jarvis"
+    # В openwakeword 0.4 модели уже лежат внутри пакета (resources/models),
+    # качать ничего не нужно: _resolve_model_paths найдёт их по имени.
     try:
-        # при первом запуске дотягиваем модели (они малы, ~1 МБ на слово)
-        from openwakeword.utils import download_models
-        download_models(model_names=[name])
+        return WakeWordDetector([name], config.wakeword_threshold())
     except Exception as e:  # noqa: BLE001
-        log.warning("не удалось скачать модель wake word %s: %s", name, e)
-    return WakeWordDetector([name], config.wakeword_threshold())
+        log.warning("wake word «%s» не поднялся: %s", name, e)
+        return None

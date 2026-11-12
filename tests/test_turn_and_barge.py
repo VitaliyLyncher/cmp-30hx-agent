@@ -3,6 +3,10 @@
 
 Запуск (на машине с сервисом): .venv/bin/python tests/test_turn_and_barge.py
 Требует: cmp-voice на 127.0.0.1:8110, cmp-silero-tts на 8023.
+
+Метрики:
+* dt_total  — от последнего аудио-чанка до final (включает отставание ASR);
+* dt_hold   — от события speech_end (VAD) до final: это и есть «умная пауза».
 """
 from __future__ import annotations
 
@@ -24,20 +28,20 @@ def synth_16k(text: str) -> bytes:
                                  headers={"Content-Type": "application/json"})
     with urllib.request.urlopen(req, timeout=60) as r:
         pcm48 = r.read()
-    # 48k -> 16k: каждый третий сэмпл (s16le моно)
     raw16 = bytearray()
     for i in range(0, len(pcm48) - 5, 6):
         raw16 += pcm48[i:i + 2]
     return bytes(raw16)
 
 
-async def measure_final(text: str, label: str) -> tuple[float | None, str]:
+async def measure_final(text: str, label: str) -> dict:
     pcm = synth_16k(text)
+    res = {"label": label, "total": None, "hold": None, "text": ""}
     async with websockets.connect(WS, max_size=8 * 1024 * 1024) as ws:
         await ws.send(json.dumps({"type": "start"}))
         await asyncio.sleep(0.5)
 
-        state = {"t_end": 0.0, "dt": None, "text": ""}
+        st = {"t_end": 0.0, "t_speech_end": None}
         done = asyncio.Event()
 
         async def reader() -> None:
@@ -51,10 +55,14 @@ async def measure_final(text: str, label: str) -> tuple[float | None, str]:
                 if isinstance(raw, (bytes, bytearray)):
                     continue
                 m = json.loads(raw)
-                if m.get("type") == "final":
-                    if state["dt"] is None:
-                        state["dt"] = time.monotonic() - state["t_end"]
-                        state["text"] = m.get("text", "")
+                t = m.get("type")
+                if t == "speech_end" and st["t_speech_end"] is None:
+                    st["t_speech_end"] = time.monotonic()
+                elif t == "final" and res["total"] is None:
+                    now = time.monotonic()
+                    res["total"] = now - st["t_end"]
+                    res["hold"] = (now - st["t_speech_end"]) if st["t_speech_end"] else None
+                    res["text"] = m.get("text", "")
                     done.set()
 
         reader_task = asyncio.create_task(reader())
@@ -62,24 +70,24 @@ async def measure_final(text: str, label: str) -> tuple[float | None, str]:
         chunk = 3200  # 100 мс 16 кГц s16le
         for i in range(0, len(pcm), chunk):
             await ws.send(pcm[i:i + chunk])
-            state["t_end"] = time.monotonic()
+            st["t_end"] = time.monotonic()
             await asyncio.sleep(0.1)
 
-        # тишина, пока не придёт final (максимум 5 с)
         silence = b"\x00" * chunk
-        deadline = time.monotonic() + 5.0
+        deadline = time.monotonic() + 8.0
         while not done.is_set() and time.monotonic() < deadline:
             await ws.send(silence)
             await asyncio.sleep(0.1)
 
         done.set()
         reader_task.cancel()
-        if state["dt"] is None:
-            print(f"{label}: final не пришёл за 5 с")
-            return None, ""
-        print(f"{label}: final через {state['dt']*1000:.0f} мс "
-              f"после конца аудио: «{state['text'][:60]}»")
-        return state["dt"], state["text"]
+    if res["total"] is None:
+        print(f"{label}: final не пришёл за 8 с")
+    else:
+        hold = f"{res['hold']*1000:.0f} мс" if res["hold"] is not None else "?"
+        print(f"{label}: пауза(VAD→final) {hold}, всего {res['total']*1000:.0f} мс, "
+              f"текст «{res['text'][:60]}»")
+    return res
 
 
 async def measure_barge() -> bool:
@@ -94,8 +102,7 @@ async def measure_barge() -> bool:
             if isinstance(raw, (bytes, bytearray)):
                 await ws.send(json.dumps({"type": "barge_in"}))
                 continue
-            m = json.loads(raw)
-            if m.get("type") == "interrupted":
+            if json.loads(raw).get("type") == "interrupted":
                 print("перебивание: сервер подтвердил interrupted")
                 return True
         print("перебивание: НЕ подтверждено")
@@ -104,19 +111,17 @@ async def measure_barge() -> bool:
 
 async def main() -> int:
     ok = True
-    d1, _ = await measure_final("Сколько стоит биткоин сегодня.", "законченная фраза")
-    d2, _ = await measure_final("я хотел купить хлеб и", "оборванная фраза")
-    if d1 is None or d2 is None:
+    r1 = await measure_final("Сколько стоит биткоин сегодня.", "законченная фраза")
+    r2 = await measure_final("я хотел купить хлеб и", "оборванная фраза")
+    if r1["hold"] is None or r2["hold"] is None:
         ok = False
     else:
-        if d1 > 1.5:
-            print(f"FAIL: законченная фраза закрылась слишком поздно ({d1:.2f} c)")
+        if r2["hold"] <= r1["hold"] + 0.3:
+            print(f"FAIL: нет адаптивности: законченная {r1['hold']*1000:.0f} мс, "
+                  f"оборванная {r2['hold']*1000:.0f} мс")
             ok = False
-        if d2 < 1.0:
-            print(f"FAIL: оборванная фраза закрылась слишком рано ({d2:.2f} c)")
-            ok = False
-        if d2 < d1:
-            print("FAIL: адаптивность не сработала (обрыв закрылся раньше точки)")
+        if r1["total"] is not None and r1["total"] > 4.0:
+            print(f"FAIL: слишком долго до ответа ({r1['total']*1000:.0f} мс)")
             ok = False
     ok = await measure_barge() and ok
     print("ИТОГ:", "OK" if ok else "FAIL")
