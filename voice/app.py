@@ -1,4 +1,4 @@
-﻿"""Голосовой диалоговый сервис.
+"""Голосовой диалоговый сервис.
 
 Конвейер (раздел 3 ТЗ):
   браузер -> PCM16 16 кГц по WebSocket -> стриминговый ASR (CPU, свой поток)
@@ -340,6 +340,7 @@ class Session:
             await self.send({"type": "speech_start"})
         elif kind == "speech_end":
             self.turn_detector.on_silence()
+            await self.send({"type": "speech_end"})
         elif kind == "partial":
             self.source = "asr"
             self.turn_detector.on_partial(ev["text"])
