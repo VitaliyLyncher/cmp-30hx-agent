@@ -96,6 +96,7 @@ input[type=checkbox]{accent-color:var(--acc);width:15px;height:15px}
           <button data-eng="silero">TTS: silero</button>
           <button data-eng="kokoro">kokoro</button>
         </div>
+        <select id="selVoice" title="голос озвучки" style="max-width:150px"></select>
         <button id="btnReset" title="сбросить историю, база остаётся в KV">Сброс</button>
       </div>
       <div class="hint" id="micHint"></div>
@@ -158,7 +159,7 @@ const $ = (id) => document.getElementById(id);
 const el = {
   status: $("status"), llmpill: $("llmpill"), ttcinfo: $("ttcinfo"),
   btnTalk: $("btnTalk"), dot: $("dot"), state: $("state"),
-  segTTS: $("segTTS"), btnReset: $("btnReset"), micHint: $("micHint"),
+  segTTS: $("segTTS"), selVoice: $("selVoice"), btnReset: $("btnReset"), micHint: $("micHint"),
   partial: $("partial"), answer: $("answer"), genmeta: $("genmeta"),
   txt: $("txt"), btnSend: $("btnSend"), wordMode: $("wordMode"),
   wordBuf: $("wordBuf"), modeHint: $("modeHint"), chips: $("chips"),
@@ -170,6 +171,8 @@ const el = {
 let ws = null, audioCtx = null, micStream = null, workletNode = null, srcNode = null;
 let playCtx = null, nextPlayTime = 0, sampleRate = 24000;
 let busy = false, partialCount = 0, kvRows = 0, currentTTS = "silero";
+let cfg = {};   // последний ответ /config (движки и их голоса)
+let currentVoice = "";   // выбранный голос для currentTTS
 let kvNewTotal = 0, kvCtx = 24576, speechStartedAt = 0, lastPartialAt = 0, liveTimer = null;
 let answerText = "";
 
@@ -237,20 +240,49 @@ async function loadConfig() {
   try {
     const r = await fetch("/config");
     const c = await r.json();
-    currentTTS = localStorage.getItem("tts") || c.tts_active || "qwen";
+    cfg = c;
+    currentTTS = localStorage.getItem("tts") || c.tts_active || "silero";
     for (const b of el.segTTS.querySelectorAll("button")) {
       const info = (c.tts_engines || []).find(x => x.name === b.dataset.eng);
       b.disabled = !info || !info.available;
+      b.dataset.__unavail = (!info || !info.available) ? "1" : "0";
       b.title = info && !info.available ? (info.reason || "недоступен") : "";
       b.classList.toggle("on", b.dataset.eng === currentTTS);
     }
     if (c.tts_engines && !(c.tts_engines.find(x => x.name === currentTTS) || {}).available) {
       currentTTS = c.tts_active;
     }
+    fillVoices();
     el.modeHint.textContent = c.tools_enabled
       ? "Enter отправляет всю фразу целиком: prefill + генерация. Инструменты включены."
       : "Enter отправляет всю фразу целиком. Инструменты выключены (VOICE_TOOLS_ENABLED=0).";
   } catch (e) { logEvent("не удалось прочитать /config", "err"); }
+}
+
+// Голоса выбранного TTS-движка: <select> рядом с переключателем движков.
+function fillVoices() {
+  const info = ((cfg.tts_engines) || []).find(x => x.name === currentTTS) || {};
+  const voices = Array.isArray(info.voices) ? info.voices : [];
+  el.selVoice.innerHTML = "";
+  if (!voices.length) {
+    el.selVoice.style.display = "none";
+    currentVoice = "";
+    return;
+  }
+  el.selVoice.style.display = "";
+  const saved = localStorage.getItem("ttsvoice:" + currentTTS) || "";
+  currentVoice = voices.includes(saved) ? saved : voices[0];
+  for (const v of voices) {
+    const o = document.createElement("option");
+    o.value = v;
+    o.textContent = v;
+    el.selVoice.appendChild(o);
+  }
+  el.selVoice.value = currentVoice;
+  el.selVoice.title = "голос: " + voices.join(", ");
+  if (ws && ws.readyState === WebSocket.OPEN && currentVoice) {
+    ws.send(JSON.stringify({ type: "tts_voice", voice: currentVoice }));
+  }
 }
 
 // ------------------------------------------------------------------ WebSocket
@@ -264,6 +296,7 @@ function connect() {
     setState("готов", false);
     ws.send(JSON.stringify({ type: "stat" }));
     ws.send(JSON.stringify({ type: "tts_engine", engine: currentTTS }));
+    if (currentVoice) ws.send(JSON.stringify({ type: "tts_voice", voice: currentVoice }));
   };
 
   ws.onclose = () => {
@@ -352,8 +385,19 @@ function handle(m) {
     case "tts_engine_set":
       currentTTS = m.engine;
       localStorage.setItem("tts", currentTTS);
+      if (Array.isArray(m.voices)) {
+        const e = (cfg.tts_engines || []).find(x => x.name === m.engine);
+        if (e) e.voices = m.voices;
+      }
       markTTSSeg();
+      fillVoices();
       logEvent(`TTS движок: ${m.engine}`, "okc");
+      break;
+    case "tts_voice_set":
+      currentVoice = m.voice || "";
+      if (currentVoice) localStorage.setItem("ttsvoice:" + m.engine, currentVoice);
+      if (el.selVoice.value !== currentVoice) el.selVoice.value = currentVoice;
+      logEvent(`голос: ${currentVoice}`, "okc");
       break;
     case "audio_meta":
       sampleRate = m.sample_rate || 24000;
@@ -461,6 +505,7 @@ function lockControls(lock) {
   el.btnSend.disabled = lock;
   el.txt.disabled = lock;
   el.btnTalk.disabled = lock;
+  el.selVoice.disabled = lock;
   if (lock) el.micHint.textContent = "во время хода переключатели заблокированы";
 }
 
@@ -594,6 +639,19 @@ el.segTTS.onclick = (ev) => {
   if (!b || b.disabled) return;
   if (busy) { logEvent("нельзя переключать TTS во время хода", "warnc"); return; }
   send({ type: "tts_engine", engine: b.dataset.eng });
+};
+
+el.selVoice.onchange = () => {
+  const v = el.selVoice.value;
+  if (!v) return;
+  if (busy) {
+    logEvent("нельзя менять голос во время хода", "warnc");
+    el.selVoice.value = currentVoice;
+    return;
+  }
+  currentVoice = v;
+  localStorage.setItem("ttsvoice:" + currentTTS, v);
+  send({ type: "tts_voice", voice: v });
 };
 
 el.btnReset.onclick = () => send({ type: "reset" });

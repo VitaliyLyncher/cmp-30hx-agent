@@ -250,6 +250,8 @@ class Session:
         self.word_mode = False
         self.word_buf = ""
         self.tts_backend_name = tts_registry.active
+        # Выбранный голос для текущего движка (None = голос по умолчанию).
+        self.tts_voice: str | None = None
         self._closing = False
 
     # -- отправка ---------------------------------------------------------
@@ -281,7 +283,7 @@ class Session:
                 return
             try:
                 backend = tts_registry.get(self.tts_backend_name)
-                async for chunk in backend.stream(text):
+                async for chunk in backend.stream(text, self.tts_voice):
                     if chunk:
                         await self.send({"type": "audio_meta",
                                          "sample_rate": backend.sample_rate})
@@ -564,7 +566,30 @@ async def handle_command(s: Session, cmd: dict) -> None:
         # Движок — свойство сеанса, а не глобальное: иначе переключение одного
         # клиента меняет голос всем остальным подключённым.
         s.tts_backend_name = name
-        await s.send({"type": "tts_engine_set", "engine": name})
+        # Голоса у движков разные: при смене движка возвращаемся к дефолтному.
+        s.tts_voice = None
+        await s.send({"type": "tts_engine_set", "engine": name,
+                      "voices": tts_registry.get(name).voices()})
+
+    elif t == "tts_voice":
+        name = str(cmd.get("voice", "") or "")
+        if s.busy:
+            await s.send({"type": "tts_error", "status": 409,
+                          "error": "нельзя менять голос во время хода"})
+            return
+        try:
+            backend = tts_registry.get(s.tts_backend_name)
+        except tts_mod.TTSError as e:
+            await s.send({"type": "tts_error", "status": e.status, "error": str(e)})
+            return
+        voices = backend.voices() or []
+        if name and name not in voices:
+            await s.send({"type": "tts_error", "status": 400,
+                          "error": f"неизвестный голос «{name}» для {backend.name}"})
+            return
+        s.tts_voice = name or None
+        await s.send({"type": "tts_voice_set", "engine": backend.name,
+                      "voice": s.tts_voice or (backend.voices() or [None])[0]})
 
     elif t == "reset":
         if s.busy:

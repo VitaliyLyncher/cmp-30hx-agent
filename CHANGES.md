@@ -1,4 +1,4 @@
-﻿# Изменения в этом форке
+# Изменения в этом форке
 
 Форк [amorev/cmp-30hx-agent](https://github.com/amorev/cmp-30hx-agent) с правками по итогам
 код-ревью. Исходный код и документация сохранены без изменений, кроме перечисленного ниже.
@@ -57,6 +57,21 @@
 | `voice/asr.py` | ограниченная очередь PCM (≈20 с) с выбросом старых кадров и счётчиком потерь вместо неограниченного роста памяти |
 | `voice/tts.py` | битый chunked-ответ Silero — явная `TTSError` (502), раньше поток молча обрывался и клиент получал усечённое аудио |
 | `voice/config.py` | новый параметр `VOICE_TURN_TIMEOUT` |
+
+## Голос TTS и альтернативы поиску (12.11.2026)
+
+- **Выбор голоса в интерфейсе**: `voice/app.py` — команда `tts_voice` (валидация по
+  списку голосов движка, запрет во время хода), `tts_engine_set` теперь возвращает
+  список голосов, `Session.tts_voice` передаётся в `backend.stream(text, voice)`.
+  `voice/static/index.html` — `<select id="selVoice">` рядом с переключателем движков,
+  голос запоминается в `localStorage` отдельно для каждого движка, блокируется на время хода.
+- **Провайдеры веб-поиска** (`voice/tools.py`, `voice/config.py`): `SEARCH_PROVIDER`
+  = `auto|ddg|tavily|brave|searxng|wormsoft`.
+  `auto`: tavily (ключ) → brave (ключ) → searxng (URL) → wormsoft (токен) → **ddg**
+  (бесплатно, без ключа, `html.duckduckgo.com`). `web_fetch` без wormsoft-токена
+  читает страницу напрямую через urllib. В `/health` добавлен `tools_token.provider`.
+  Ключи: `TAVILY_API_KEY`, `BRAVE_API_KEY`, `SEARXNG_URL`, таймаут `SEARCH_TIMEOUT`.
+  Если выбранный провайдер падает — автоматический фолбэк на DDG.
 
 ## Инфраструктура
 

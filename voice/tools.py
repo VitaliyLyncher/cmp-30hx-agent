@@ -16,6 +16,7 @@ import os
 import re
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime
 from pathlib import Path
@@ -82,7 +83,7 @@ def _read_token() -> tuple[str, str | None]:
 def token_status() -> dict:
     """Для /health: только факт наличия и источник, без значения."""
     tok, source = _read_token()
-    return {"present": bool(tok), "source": source}
+    return {"present": bool(tok), "source": source, "provider": resolve_provider()}
 
 
 def reset_token_cache() -> None:
@@ -199,20 +200,200 @@ def compress(text: str, limit: int = 900, max_fragments: int = 4) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Провайдеры веб-поиска
+# ---------------------------------------------------------------------------
+_UA = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+       "(KHTML, like Gecko) Chrome/128.0 Safari/537.36")
+
+
+class SearchError(RuntimeError):
+    pass
+
+
+def _http(url: str, *, data: bytes | None = None, headers: dict | None = None,
+          timeout: float | None = None) -> bytes:
+    h = {"User-Agent": _UA}
+    if headers:
+        h.update(headers)
+    req = urllib.request.Request(url, data=data, headers=h)
+    with urllib.request.urlopen(req, timeout=timeout or config.search_timeout()) as r:
+        return r.read()
+
+
+def _http_json(url: str, **kw) -> dict:
+    raw = _http(url, **kw)
+    return json.loads(raw.decode("utf-8", "replace"))
+
+
+def _fmt_results(items: list[dict]) -> str:
+    """Список результатов -> компактный текст (без markdown и длинных URL)."""
+    lines = []
+    for i, it in enumerate(items, 1):
+        title = str(it.get("title") or "").strip()
+        snippet = str(it.get("snippet") or it.get("content") or "").strip()
+        host = ""
+        m = re.match(r"https?://([^/]+)", str(it.get("url") or ""))
+        if m:
+            host = m.group(1)
+        line = f"{i}) {title}" if title else f"{i})"
+        if snippet:
+            line += " — " + snippet
+        if host:
+            line += f" (источник: {host})"
+        lines.append(line)
+    return "\n".join(lines) if lines else "поиск недоступен: пустой ответ"
+
+
+def _search_ddg(query: str, n: int) -> list[dict]:
+    """DuckDuckGo HTML: без ключа и регистрации (неофициальный, но живой)."""
+    q = urllib.parse.quote_plus(query)
+    html = _http(f"https://html.duckduckgo.com/html/?q={q}").decode("utf-8", "replace")
+    out: list[dict] = []
+    # блоки результатов: <a class="result__a" href="...">Заголовок</a> ... snippet
+    for m in re.finditer(
+            r'<a[^>]+class="result__a"[^>]+href="([^"]+)"[^>]*>(.*?)</a>'
+            r'(?:.{0,1200}?class="result__snippet"[^>]*>(.*?)</(?:a|div|td)>)?',
+            html, re.S | re.I):
+        href, title, snippet = m.group(1), m.group(2), m.group(3)
+        href = href.replace("&amp;", "&")
+        # DDG отдаёт редирект вида //duckduckgo.com/l/?uddg=<encoded url>
+        if "uddg=" in href:
+            try:
+                href = urllib.parse.unquote(href.split("uddg=", 1)[1].split("&", 1)[0])
+            except Exception:  # noqa: BLE001
+                pass
+        title = re.sub(r"<[^>]+>", " ", title or "")
+        snippet = re.sub(r"<[^>]+>", " ", snippet or "")
+        out.append({"title": title.strip(), "snippet": snippet.strip(), "url": href})
+        if len(out) >= n:
+            break
+    if not out:
+        raise SearchError("DuckDuckGo не вернул результатов")
+    return out[:n]
+
+
+def _search_tavily(query: str, n: int) -> list[dict]:
+    key = config.tavily_key()
+    if not key:
+        raise SearchError("нет TAVILY_API_KEY")
+    payload = json.dumps({"query": query, "max_results": n,
+                          "search_depth": "basic"}).encode()
+    data = _http_json("https://api.tavily.com/search", data=payload,
+                      headers={"Content-Type": "application/json",
+                               "Authorization": "Bearer " + key})
+    items = [{"title": r.get("title"), "snippet": r.get("content"),
+              "url": r.get("url")} for r in (data.get("results") or [])][:n]
+    if not items:
+        raise SearchError("Tavily не вернул результатов")
+    return items
+
+
+def _search_brave(query: str, n: int) -> list[dict]:
+    key = config.brave_key()
+    if not key:
+        raise SearchError("нет BRAVE_API_KEY")
+    q = urllib.parse.quote_plus(query)
+    data = _http_json(f"https://api.search.brave.com/res/v1/web/search?q={q}&count={n}",
+                      headers={"X-Subscription-Token": key,
+                               "Accept": "application/json"})
+    items = ((data.get("web") or {}).get("results") or [])[:n]
+    if not items:
+        raise SearchError("Brave не вернул результатов")
+    return [{"title": r.get("title"),
+             "snippet": " ".join(re.sub(r"<[^>]+>", " ", r.get("description") or "").split()),
+             "url": r.get("url")} for r in items]
+
+
+def _search_searxng(query: str, n: int) -> list[dict]:
+    base = config.searxng_url().rstrip("/")
+    if not base:
+        raise SearchError("нет SEARXNG_URL")
+    q = urllib.parse.quote_plus(query)
+    data = _http_json(f"{base}/search?q={q}&format=json&language=ru")
+    items = (data.get("results") or [])[:n]
+    if not items:
+        raise SearchError("SearXNG не вернул результатов")
+    return [{"title": r.get("title"), "snippet": r.get("content"), "url": r.get("url")}
+            for r in items]
+
+
+def _fetch_direct(url: str) -> str:
+    raw = _http(url, timeout=config.search_timeout()).decode("utf-8", "replace")
+    raw = re.sub(r"(?is)<(script|style|noscript)[^>]*>.*?</\1>", " ", raw)
+    text = re.sub(r"(?s)<[^>]+>", " ", raw)
+    text = re.sub(r"&nbsp;?", " ", text)
+    text = re.sub(r"&(amp|lt|gt|quot|#39);", lambda m: {"amp": "&", "lt": "<",
+                                                       "gt": ">", "quot": '"',
+                                                       "#39": "'"}[m.group(1)], text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def resolve_provider() -> str:
+    p = config.search_provider()
+    if p and p != "auto":
+        return p
+    if config.tavily_key():
+        return "tavily"
+    if config.brave_key():
+        return "brave"
+    if config.searxng_url():
+        return "searxng"
+    if _read_token()[0]:
+        return "wormsoft"
+    return "ddg"
+
+
+# ---------------------------------------------------------------------------
 # Реализации инструментов
 # ---------------------------------------------------------------------------
 def web_search(query: str, max_results: int = 5) -> str:
-    raw = mcp_call("web_search", {"query": query, "max_results": int(max_results)})
-    if raw.startswith("поиск недоступен"):
-        return raw
-    return compress(raw)
+    n = max(1, min(10, int(max_results)))
+    provider = resolve_provider()
+    try:
+        if provider == "wormsoft":
+            raw = mcp_call("web_search", {"query": query, "max_results": n})
+            if raw.startswith("поиск недоступен"):
+                # токен есть, но сервис не ответил — пробуем DDG как запасной
+                return _fmt_results(_search_ddg(query, n))
+            return compress(raw)
+        if provider == "tavily":
+            return _fmt_results(_search_tavily(query, n))
+        if provider == "brave":
+            return _fmt_results(_search_brave(query, n))
+        if provider == "searxng":
+            return _fmt_results(_search_searxng(query, n))
+        return _fmt_results(_search_ddg(query, n))
+    except SearchError as e:
+        if provider != "ddg":
+            try:
+                return _fmt_results(_search_ddg(query, n))
+            except Exception:  # noqa: BLE001
+                pass
+        return f"поиск недоступен: {e}"
+    except urllib.error.HTTPError as e:
+        hint = {401: "ключ/токен не принят (401)", 403: "доступ запрещён (403)",
+                429: "слишком много запросов (429)"}.get(e.code, f"HTTP {e.code}")
+        return f"поиск недоступен: {hint}"
+    except urllib.error.URLError as e:
+        return f"поиск недоступен: сеть недоступна ({e.reason.__class__.__name__})"
+    except TimeoutError:
+        return "поиск недоступен: истёк таймаут запроса"
+    except (json.JSONDecodeError, OSError, ValueError) as e:
+        return f"поиск недоступен: {e.__class__.__name__}"
 
 
 def web_fetch(url: str) -> str:
-    raw = mcp_call("web_fetch", {"url": url})
-    if raw.startswith("поиск недоступен"):
-        return raw
-    return compress(raw, limit=1500, max_fragments=1)
+    if resolve_provider() == "wormsoft":
+        raw = mcp_call("web_fetch", {"url": url})
+        if not raw.startswith("поиск недоступен"):
+            return compress(raw, limit=1500, max_fragments=1)
+    try:
+        text = _fetch_direct(url)
+        return compress(text, limit=1500, max_fragments=1)
+    except urllib.error.HTTPError as e:
+        return f"загрузка недоступна: HTTP {e.code}"
+    except (urllib.error.URLError, OSError, TimeoutError, ValueError) as e:
+        return f"загрузка недоступна: {e.__class__.__name__}"
 
 
 def current_time() -> str:

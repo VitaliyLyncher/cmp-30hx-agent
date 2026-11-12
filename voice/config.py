@@ -180,3 +180,11 @@ def asr_tail_silence() -> float: return f("ASR_TAIL_SILENCE", 1.0)
 def worm_mcp_url() -> str: return s("WORM_MCP_URL", "https://ai.wormsoft.ru/api/mcp")
 def worm_mcp_timeout() -> float: return f("WORM_MCP_TIMEOUT", 45.0)
 def worm_token_file() -> str: return s("WORM_TOKEN_FILE", str(HOME / ".wormsoft-token"))
+
+# --- Веб-поиск: провайдер (альтернативы wormsoft MCP) ---
+# auto: tavily (ключ) -> brave (ключ) -> searxng (URL) -> wormsoft (токен) -> ddg (без ключа)
+def search_provider() -> str: return s("SEARCH_PROVIDER", "auto").strip().lower()
+def tavily_key() -> str: return s("TAVILY_API_KEY", "").strip()
+def brave_key() -> str: return s("BRAVE_API_KEY", "").strip()
+def searxng_url() -> str: return s("SEARXNG_URL", "").strip()
+def search_timeout() -> float: return f("SEARCH_TIMEOUT", 20.0)
