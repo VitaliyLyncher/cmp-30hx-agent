@@ -225,9 +225,12 @@ def search_timeout() -> float: return f("SEARCH_TIMEOUT", 20.0)
 # --- Действия (музыка/видео/сайты) -------------------------------------------
 # Какой музыкальный сервис открывать: youtube_music | spotify | yandex | soundcloud
 def music_service() -> str: return s("MUSIC_SERVICE", "youtube_music").strip().lower()
-# host — играть на этом ПК (yt-dlp + ffplay), browser — открыть сервис в браузере
+# host — играть на этом ПК (yt-dlp + mpv), browser — открыть сервис в браузере
 def music_playback() -> str: return s("MUSIC_PLAYBACK", "host").strip().lower()
 def ytdlp_timeout() -> float: return f("YTDLP_TIMEOUT", 60.0)
+# локальная папка с музыкой (Windows «Музыка» видна в WSL как /mnt/c/...)
+def music_dir() -> str: return s("MUSIC_DIR", "/mnt/c/Users/Administrator/Music")
+def music_playlist_size() -> int: return i("MUSIC_PLAYLIST_SIZE", 5)
 # Домены, которые разрешено открывать действием (через запятую)
 def action_domains() -> list[str]:
     raw = s("ACTION_DOMAINS",

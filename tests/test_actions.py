@@ -88,6 +88,18 @@ def main() -> int:
     check("роутер: обычный вопрос не трогаем",
           tools.route_action("сколько стоит биткоин") is None)
     check("роутер: пустая строка", tools.route_action("") is None)
+    check("роутер: пауза", tools.route_action("поставь на паузу") == ("pause_music", {}))
+    check("роутер: продолжить", tools.route_action("продолжи музыку") == ("resume_music", {}))
+    check("роутер: громче", tools.route_action("сделай громче") == ("set_volume", {"level": "+10"}))
+    check("роутер: тише", tools.route_action("убавь громкость") == ("set_volume", {"level": "-10"}))
+    check("роутер: громкость числом",
+          tools.route_action("громкость 30") == ("set_volume", {"level": "30"}))
+    check("роутер: что играет", tools.route_action("что играет") == ("music_status", {}))
+    r = tools.route_action("включи мою музыку")
+    check("роутер: локальная папка", r is not None and r[0] == "play_local", str(r))
+    r = tools.route_action("включи мою музыку тестовую")
+    check("роутер: локальная с запросом",
+          r is not None and r[0] == "play_local" and "тестов" in r[1].get("query", ""), str(r))
 
     print()
     print("ИТОГ:", "OK" if FAILS == 0 else f"{FAILS} FAIL")

@@ -537,6 +537,17 @@ _SITE_RE = re.compile(r"\b(открой|перейди|зайди)\b\s*(?:сай
                       r"((?:https?://)?[\w.-]+\.[a-z]{2,}(?:/\S*)?)", re.I)
 _MEDIA_WORDS = re.compile(r"\b(видео|ролик|клип|фильм|ютуб|youtube)\b", re.I)
 _MUSIC_WORDS = re.compile(r"\b(музык\w*|песн\w*|трек\w*|альбом\w*|плейлист\w*)\b", re.I)
+_PAUSE_RE = re.compile(r"\b(паузу?|приостанови|поставь на паузу|стоп-пауза)\b", re.I)
+_RESUME_RE = re.compile(r"\b(продолжи|продолжай|сними с паузы|играй дальше|дальше играй)\b", re.I)
+_NEXT_RE = re.compile(r"\b(следующий|следующ\w*|дальше|некст|переключи трек)\b", re.I)
+_PREV_RE = re.compile(r"\b(предыдущий|предыдущ\w*|верни назад|назад трек)\b", re.I)
+_STATUS_RE = re.compile(r"\b(что играет|что за (трек|песня|музыка)|какая (песня|музыка) играет)\b", re.I)
+_LOCAL_RE = re.compile(r"\b(мою|моя|моей|локальн\w*|из папки|с диска|папк\w* музыка)\b", re.I)
+
+
+def _playing() -> bool:
+    p = _player.get("proc")
+    return p is not None and p.poll() is None
 
 
 def route_action(text: str) -> tuple[str, dict] | None:
@@ -546,6 +557,31 @@ def route_action(text: str) -> tuple[str, dict] | None:
         return None
     if _STOP_RE.search(t):
         return "stop_music", {}
+
+    if _PAUSE_RE.search(t):
+        return "pause_music", {}
+    if _RESUME_RE.search(t):
+        return "resume_music", {}
+    if _NEXT_RE.search(t) and (_playing() or _MUSIC_WORDS.search(t)):
+        return "next_track", {}
+    if _PREV_RE.search(t) and (_playing() or _MUSIC_WORDS.search(t)):
+        return "prev_track", {}
+    if _STATUS_RE.search(t):
+        return "music_status", {}
+
+    m = re.search(r"громкост\w*\s*(?:на\s*)?(\d{1,3})", t, re.I)
+    if m:
+        return "set_volume", {"level": m.group(1)}
+    if re.search(r"\b(громче|прибавь|увеличь громкость)\b", t, re.I):
+        return "set_volume", {"level": "+10"}
+    if re.search(r"\b(тише|убавь|уменьши громкость|сбавь)\b", t, re.I):
+        return "set_volume", {"level": "-10"}
+
+    if _LOCAL_RE.search(t) and (_MUSIC_WORDS.search(t) or "коллекц" in t.lower()):
+        q = _MUSIC_WORDS.sub(" ", t)
+        q = _LOCAL_RE.sub(" ", q)
+        q = re.sub(r"\b(включи|поставь|сыграй|запусти|мне|музыку|треки|песни)\b", " ", q, flags=re.I)
+        return "play_local", {"query": q.strip(" .,!-—")}
 
     m = _VIDEO_RE.match(t)
     if m:
@@ -573,9 +609,14 @@ def route_action(text: str) -> tuple[str, dict] | None:
     return None
 
 
-# --- воспроизведение на этом ПК (yt-dlp -> ffplay, звук через WSLg PulseAudio) --
-_player: dict = {"proc": None, "title": ""}
+# --- воспроизведение на этом ПК (yt-dlp -> mpv, звук через WSLg PulseAudio) ---
+# mpv выбран вместо ffplay: он умеет плейлист, паузу и громкость через JSON-IPC,
+# то есть поддерживает «пауза», «дальше», «громче» без перезапуска.
+_player: dict = {"proc": None, "items": [], "titles": [], "query": "",
+                 "volume": 80, "sock": None}
 _player_lock = threading.Lock()
+_MPV_SOCK = "/tmp/cmp-voice-mpv.sock"
+_AUDIO_EXT = (".mp3", ".flac", ".ogg", ".m4a", ".wav", ".opus", ".aac", ".wma")
 
 
 def _pulse_env() -> dict:
@@ -588,26 +629,124 @@ def _pulse_env() -> dict:
     return env
 
 
-def _resolve_audio(query: str) -> str:
-    """Первый результат YouTube -> прямой URL аудиопотока."""
+def _mpv_bin() -> str:
+    return shutil.which("mpv") or "/usr/bin/mpv"
+
+
+def _ipc(cmd: list, timeout: float = 2.0) -> dict | None:
+    """Команда mpv через unix-socket. None, если плеер не запущен."""
+    sock = _player.get("sock")
+    if not sock or _player.get("proc") is None:
+        return None
+    try:
+        import socket
+
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+            s.settimeout(timeout)
+            s.connect(sock)
+            s.sendall((json.dumps({"command": cmd}) + "\n").encode())
+            buf = b""
+            while b"\n" not in buf:
+                chunk = s.recv(8192)
+                if not chunk:
+                    break
+                buf += chunk
+            if not buf:
+                return None
+            return json.loads(buf.decode(errors="replace").splitlines()[0])
+    except (OSError, ValueError):
+        return None
+
+
+def _ipc_get(prop: str):
+    r = _ipc(["get_property", prop])
+    if not r or r.get("error") != "success":
+        return None
+    return r.get("data")
+
+
+def _resolve_audio(query: str, count: int = 5) -> list[str]:
+    """Поиск на YouTube -> прямые URL аудиопотоков (для плейлиста)."""
     cmd = [sys.executable, "-m", "yt_dlp", "--no-playlist", "--no-warnings",
-           "--default-search", "ytsearch1",
+           "--default-search", "ytsearch%d" % max(1, count),
            "-f", "bestaudio[ext=m4a]/bestaudio", "-g", query]
     r = subprocess.run(cmd, capture_output=True, text=True,
                        timeout=config.ytdlp_timeout(), env=_pulse_env())
-    urls = [ln.strip() for ln in (r.stdout or "").splitlines() if ln.strip().startswith("http")]
+    urls = [ln.strip() for ln in (r.stdout or "").splitlines()
+            if ln.strip().startswith("http")]
     if r.returncode != 0 or not urls:
         tail = (r.stderr or "").strip().splitlines()
         raise RuntimeError(tail[-1][:120] if tail else f"код {r.returncode}")
-    return urls[0]
+    return urls
+
+
+def music_dir() -> Path:
+    d = Path(config.music_dir()).expanduser()
+    if d.is_dir():
+        return d
+    fallback = Path.home() / "Music"
+    return fallback if fallback.is_dir() else d
+
+
+def _scan_local(query: str) -> list[Path]:
+    root = music_dir()
+    if not root.is_dir():
+        return []
+    files = [p for p in root.rglob("*")
+             if p.is_file() and p.suffix.lower() in _AUDIO_EXT]
+    q = (query or "").strip().casefold()
+    if not q:
+        return sorted(files)
+    words = [w for w in re.findall(r"\w+", q) if len(w) > 1]
+    if not words:
+        return sorted(files)
+    def hay(p: Path) -> str:
+        return (p.stem + " " + p.parent.name).casefold()
+    exact = [p for p in files if all(w in hay(p) for w in words)]
+    if exact:
+        return sorted(exact)
+    # мягкий поиск: хотя бы одно слово, чтобы «включи мелодию» нашло «Тестовая мелодия»
+    return sorted(p for p in files if any(w in hay(p) for w in words))
+
+
+def _start_playlist(items: list[str], titles: list[str], query: str) -> str | None:
+    """Запускает mpv с плейлистом. Возвращает текст ошибки или None."""
+    binp = _mpv_bin()
+    if not os.path.exists(binp):
+        return "Не могу играть на этом ПК: нет mpv. Установите mpv (apt install mpv)."
+    if not items:
+        return "Не нашёл, что включить."
+    stop_music()
+    sock = f"{_MPV_SOCK}-{os.getpid()}"
+    try:
+        os.unlink(sock)
+    except OSError:
+        pass
+    cmd = [binp, "--no-video", "--no-terminal", "--really-quiet",
+           "--idle=no", f"--input-ipc-server={sock}",
+           f"--volume={_player['volume']}", *items]
+    try:
+        proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL, env=_pulse_env())
+    except OSError as e:
+        return f"Не удалось запустить плеер: {e.__class__.__name__}"
+    for _ in range(40):
+        if os.path.exists(sock) or proc.poll() is not None:
+            break
+        time.sleep(0.05)
+    with _player_lock:
+        _player.update(proc=proc, items=list(items), titles=list(titles),
+                       query=query, sock=sock)
+    if proc.poll() is not None:
+        return "Плеер сразу завершился — возможно, нет доступа к звуку."
+    return None
 
 
 def stop_music() -> str:
+    title = _current_title()
     with _player_lock:
         p = _player.get("proc")
-        title = _player.get("title") or ""
-        _player["proc"] = None
-        _player["title"] = ""
+        _player.update(proc=None, items=[], titles=[], query="", sock=None)
     if p is None or p.poll() is not None:
         return "Сейчас ничего не играет."
     try:
@@ -621,13 +760,113 @@ def stop_music() -> str:
     return f"Остановил музыку{f' «{title}»' if title else ''}."
 
 
-def music_now_playing() -> str:
+def _current_title() -> str:
+    t = _ipc_get("media-title")
+    if t:
+        return str(t)
     with _player_lock:
-        p = _player.get("proc")
-        title = _player.get("title") or ""
-    if p is not None and p.poll() is None:
-        return f"Сейчас играет «{title}»."
-    return "Сейчас ничего не играет."
+        titles = _player.get("titles") or []
+        idx = _ipc_get("playlist-pos")
+        if isinstance(idx, int) and 0 <= idx < len(titles):
+            return titles[idx]
+    return ""
+
+
+def pause_music() -> str:
+    if _player.get("proc") is None or _player["proc"].poll() is not None:
+        return "Сейчас ничего не играет."
+    r = _ipc(["set_property", "pause", True])
+    if not r or r.get("error") != "success":
+        return "Не удалось поставить на паузу."
+    return "Поставил на паузу."
+
+
+def resume_music() -> str:
+    if _player.get("proc") is None or _player["proc"].poll() is not None:
+        return "Сейчас ничего не играет."
+    r = _ipc(["set_property", "pause", False])
+    if not r or r.get("error") != "success":
+        return "Не удалось продолжить."
+    return "Продолжаю."
+
+
+def toggle_pause() -> str:
+    paused = _ipc_get("pause")
+    if paused is None:
+        return "Сейчас ничего не играет."
+    return resume_music() if paused else pause_music()
+
+
+def next_track() -> str:
+    if _player.get("proc") is None or _player["proc"].poll() is not None:
+        return "Сейчас ничего не играет."
+    pos = _ipc_get("playlist-pos")
+    count = _ipc_get("playlist-count")
+    if isinstance(pos, int) and isinstance(count, int) and pos + 1 >= count:
+        return "Это был последний трек в очереди."
+    r = _ipc(["playlist-next"])
+    if not r or r.get("error") != "success":
+        return "Не удалось переключить трек."
+    time.sleep(0.3)
+    t = _current_title()
+    return f"Следующий трек{f': «{t}»' if t else ''}."
+
+
+def prev_track() -> str:
+    if _player.get("proc") is None or _player["proc"].poll() is not None:
+        return "Сейчас ничего не играет."
+    pos = _ipc_get("playlist-pos")
+    if isinstance(pos, int) and pos <= 0:
+        return "Это первый трек в очереди."
+    r = _ipc(["playlist-pos", 1])
+    if not r or r.get("error") != "success":
+        return "Не удалось вернуться к предыдущему треку."
+    time.sleep(0.3)
+    t = _current_title()
+    return f"Предыдущий трек{f': «{t}»' if t else ''}."
+
+
+def set_volume(level: int | str) -> str:
+    if _player.get("proc") is None or _player["proc"].poll() is not None:
+        return "Сейчас ничего не играет."
+    cur = _ipc_get("volume")
+    cur = int(cur) if isinstance(cur, (int, float)) else int(_player.get("volume", 80))
+    if isinstance(level, str):
+        low = level.strip().lower()
+        if low in ("+", "громче", "up"):
+            new = cur + 10
+        elif low in ("-", "тише", "down"):
+            new = cur - 10
+        else:
+            m = re.search(r"-?\d+", low)
+            new = int(m.group()) if m else cur
+    else:
+        new = int(level)
+    new = max(0, min(100, new))
+    r = _ipc(["set_property", "volume", new])
+    with _player_lock:
+        _player["volume"] = new
+    if not r or r.get("error") != "success":
+        return "Не удалось изменить громкость."
+    return f"Громкость {new}%."
+
+
+def music_status() -> str:
+    if _player.get("proc") is None or _player["proc"].poll() is not None:
+        return "Сейчас ничего не играет."
+    title = _current_title() or "неизвестный трек"
+    paused = _ipc_get("pause")
+    vol = _ipc_get("volume")
+    vol_s = f", громкость {int(vol)}%" if isinstance(vol, (int, float)) else ""
+    state = "на паузе" if paused else "играет"
+    pos = _ipc_get("playlist-pos")
+    count = _ipc_get("playlist-count")
+    track = f" ({pos + 1} из {count})" if isinstance(pos, int) and isinstance(count, int) else ""
+    return f"{state} «{title}»{track}{vol_s}."
+
+
+def music_now_playing() -> str:
+    return music_status()
 
 
 def play_music(query: str) -> str:
@@ -636,30 +875,37 @@ def play_music(query: str) -> str:
         return "Не понял, какую музыку включить. Повторите название."
     if config.music_playback() == "browser":
         return music_search(q)
-    ffplay = shutil.which("ffplay") or "/usr/bin/ffplay"
-    if not os.path.exists(ffplay):
-        return ("Не могу играть на этом ПК: нет ffplay. "
-                "Установите ffmpeg или поставьте MUSIC_PLAYBACK=browser.")
-    stop_music()
     try:
-        url = _resolve_audio(q)
+        urls = _resolve_audio(q, count=config.music_playlist_size())
     except subprocess.TimeoutExpired:
         return f"Поиск «{q}» занял слишком долго. Попробуйте ещё раз."
     except Exception as e:  # noqa: BLE001
         return f"Не нашёл трек «{q}»: {e}"
-    try:
-        proc = subprocess.Popen(
-            [ffplay, "-nodisp", "-autoexit", "-loglevel", "error",
-             "-reconnect", "1", "-reconnect_streamed", "1",
-             "-reconnect_delay_max", "5", url],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            env=_pulse_env())
-    except OSError as e:
-        return f"Не удалось запустить плеер: {e.__class__.__name__}"
-    with _player_lock:
-        _player["proc"] = proc
-        _player["title"] = q
+    titles = [f"{q} ({i + 1})" for i in range(len(urls))]
+    err = _start_playlist(urls, titles, q)
+    if err:
+        return err
     return f"Включаю «{q}» на этом компьютере."
+
+
+def play_local(query: str = "") -> str:
+    q = (query or "").strip()
+    folder = music_dir()
+    if not folder.is_dir():
+        return (f"Папка музыки не найдена: {folder}. "
+                "Положите файлы туда или задайте MUSIC_DIR.")
+    files = _scan_local(q)
+    if not files:
+        return (f"В папке «{folder.name}» нет подходящих треков"
+                f"{f' по запросу «{q}»' if q else ''}.")
+    limit = config.music_playlist_size()
+    files = files[:limit]
+    titles = [p.stem for p in files]
+    err = _start_playlist([str(p) for p in files], titles, q or "локальная музыка")
+    if err:
+        return err
+    what = f"«{titles[0]}»" if len(files) == 1 else f"{len(files)} трек(ов), начиная с «{titles[0]}»"
+    return f"Включаю из папки «{folder.name}»: {what}."
 
 
 def open_site(target: str) -> str:
@@ -731,6 +977,39 @@ TOOL_SPECS: list[dict] = [
         "description": "Остановить музыку, которая сейчас играет.",
         "parameters": {"type": "object", "properties": {}}}},
     {"type": "function", "function": {
+        "name": "play_local",
+        "description": "Включить музыку из локальной папки «Музыка» на этом компьютере. "
+                       "Вызывай на «включи мою музыку», «поставь из папки», «локальную».",
+        "parameters": {"type": "object", "properties": {
+            "query": {"type": "string", "description": "часть названия файла/папки (необязательно)"},
+        }}}},
+    {"type": "function", "function": {
+        "name": "pause_music",
+        "description": "Поставить музыку на паузу.",
+        "parameters": {"type": "object", "properties": {}}}},
+    {"type": "function", "function": {
+        "name": "resume_music",
+        "description": "Продолжить музыку после паузы.",
+        "parameters": {"type": "object", "properties": {}}}},
+    {"type": "function", "function": {
+        "name": "next_track",
+        "description": "Следующий трек.",
+        "parameters": {"type": "object", "properties": {}}}},
+    {"type": "function", "function": {
+        "name": "prev_track",
+        "description": "Предыдущий трек.",
+        "parameters": {"type": "object", "properties": {}}}},
+    {"type": "function", "function": {
+        "name": "set_volume",
+        "description": "Громкость музыки: 0–100 или '+10'/'-10'.",
+        "parameters": {"type": "object", "properties": {
+            "level": {"type": "string", "description": "число или +10/-10"},
+        }, "required": ["level"]}}},
+    {"type": "function", "function": {
+        "name": "music_status",
+        "description": "Что сейчас играет: трек, позиция, пауза, громкость.",
+        "parameters": {"type": "object", "properties": {}}}},
+    {"type": "function", "function": {
         "name": "music_search",
         "description": "Открыть музыкальный сервис в браузере (без воспроизведения здесь). "
                        "Используй только если просят именно открыть сайт/сервис.",
@@ -766,6 +1045,13 @@ _REGISTRY = {
     "open_site": lambda a: open_site(str(a.get("target", ""))),
     "play_music": lambda a: play_music(str(a.get("query", ""))),
     "stop_music": lambda a: stop_music(),
+    "play_local": lambda a: play_local(str(a.get("query", ""))),
+    "pause_music": lambda a: pause_music(),
+    "resume_music": lambda a: resume_music(),
+    "next_track": lambda a: next_track(),
+    "prev_track": lambda a: prev_track(),
+    "set_volume": lambda a: set_volume(str(a.get("level", "+10"))),
+    "music_status": lambda a: music_status(),
 }
 
 
