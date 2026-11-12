@@ -74,12 +74,21 @@ async def main() -> int:
         item = (st.get("history") or [{}])[0]
         check("в истории есть id", bool(item.get("id")), str(item))
         if item.get("id"):
+            # состояние панели может сохраниться с прошлого запуска:
+            # сначала гарантированно снимаем лайк, потом ставим
+            if st["history"][0].get("liked"):
+                await ws.send(json.dumps({"type": "music_like", "id": item["id"]}))
+                st = await recv_state(ws)
+                check("подготовка: лайк снят", st["history"][0].get("liked") is False,
+                      str(st["history"][0]))
             await ws.send(json.dumps({"type": "music_like", "id": item["id"]}))
             st = await recv_state(ws)
             check("лайк через панель", st["history"][0].get("liked") is True,
                   str(st["history"][0]))
-            check("попал в избранное", len(st.get("favorites") or []) == 1,
-                  str(st.get("favorites")))
+            fav_ids = [f.get("id") for f in (st.get("favorites") or [])]
+            fav_titles = [f.get("title") for f in (st.get("favorites") or [])]
+            check("попал в избранное", item.get("id") in fav_ids
+                  or item.get("title") in fav_titles, str(st.get("favorites")))
 
             # удалить из истории — избранное остаётся
             await ws.send(json.dumps({"type": "music_delete", "id": item["id"],
@@ -87,16 +96,22 @@ async def main() -> int:
             st = await recv_state(ws)
             check("удаление из истории", item["id"] not in [h.get("id") for h in st["history"]],
                   str(st["history"])[:150])
-            check("избранное осталось", len(st.get("favorites") or []) == 1,
+            check("избранное осталось",
+                  item.get("id") in [f.get("id") for f in (st.get("favorites") or [])]
+                  or item.get("title") in [f.get("title") for f in (st.get("favorites") or [])],
                   str(st.get("favorites")))
 
             # удалить из избранного
-            fid = st["favorites"][0]["id"]
-            await ws.send(json.dumps({"type": "music_delete", "id": fid,
-                                      "scope": "favorites"}))
-            st = await recv_state(ws)
-            check("удаление из избранного", len(st.get("favorites") or []) == 0,
-                  str(st.get("favorites")))
+            fid = next((f.get("id") for f in st["favorites"]
+                        if f.get("id") == item.get("id") or f.get("title") == item.get("title")), None)
+            check("в избранном есть id", bool(fid), str(st.get("favorites")))
+            if fid:
+                await ws.send(json.dumps({"type": "music_delete", "id": fid,
+                                          "scope": "favorites"}))
+                st = await recv_state(ws)
+                check("удаление из избранного",
+                      fid not in [f.get("id") for f in (st.get("favorites") or [])],
+                      str(st.get("favorites")))
 
         await ws.send(json.dumps({"type": "music_favorites"}))
         st = await recv_state(ws)
