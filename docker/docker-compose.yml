@@ -35,6 +35,7 @@ services:
       PULSE_SERVER: unix:/mnt/wslg/PulseServer
       MUSIC_DIR: /music
       MUSIC_PLAYBACK: host
+      MUSIC_STATE_FILE: /var/lib/cmp-voice/music.json
     volumes:
       # модели
       - "${CMP_MODELS_DIR:?путь к ~/models}:/models:ro"

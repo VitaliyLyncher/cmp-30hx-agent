@@ -231,8 +231,11 @@ def ytdlp_timeout() -> float: return f("YTDLP_TIMEOUT", 60.0)
 # локальная папка с музыкой (Windows «Музыка» видна в WSL как /mnt/c/...)
 def music_dir() -> str: return s("MUSIC_DIR", "/mnt/c/Users/Administrator/Music")
 def music_playlist_size() -> int: return i("MUSIC_PLAYLIST_SIZE", 5)
-# где хранить историю прослушивания и лайки (JSON)
-def music_state_file() -> str: return s("MUSIC_STATE_FILE", "/var/lib/cmp-voice/music.json")
+# где хранить историю прослушивания и лайки (JSON).
+# По умолчанию — в домашней папке пользователя сервиса: /var/lib недоступен,
+# когда юнит запущен не от root (Permission denied на mkdir).
+def music_state_file() -> str:
+    return s("MUSIC_STATE_FILE", str(HOME / ".cache" / "cmp-voice" / "music.json"))
 # Домены, которые разрешено открывать действием (через запятую)
 def action_domains() -> list[str]:
     raw = s("ACTION_DOMAINS",
