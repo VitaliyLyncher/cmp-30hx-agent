@@ -1,4 +1,4 @@
-"""Юнит-тесты действий (музыка/видео/сайты) без сети и модели.
+﻿"""Юнит-тесты действий (музыка/видео/сайты) без сети и модели.
 
 Запуск: python3 tests/test_actions.py
 """
@@ -69,6 +69,21 @@ def main() -> int:
     # split_action на обычном тексте
     a, t = tools.split_action("просто текст")
     check("обычный текст не трогаем", a is None and t == "просто текст")
+
+    # детерминированный роутер простых команд
+    r = tools.route_action("включи музыку Rammstein Sonne")
+    check("роутер: музыка с исполнителем", r == ("play_music", {"query": "Rammstein Sonne"}), str(r))
+    r = tools.route_action("включи музыку")
+    check("роутер: музыка без запроса", r is not None and r[0] == "play_music", str(r))
+    r = tools.route_action("выключи музыку")
+    check("роутер: стоп", r == ("stop_music", {}), str(r))
+    r = tools.route_action("найди видео про сборку ПК")
+    check("роутер: видео", r == ("video_search", {"query": "сборку ПК"}), str(r))
+    r = tools.route_action("открой сайт youtube.com")
+    check("роутер: сайт", r == ("open_site", {"target": "youtube.com"}), str(r))
+    check("роутер: обычный вопрос не трогаем",
+          tools.route_action("сколько стоит биткоин") is None)
+    check("роутер: пустая строка", tools.route_action("") is None)
 
     print()
     print("ИТОГ:", "OK" if FAILS == 0 else f"{FAILS} FAIL")

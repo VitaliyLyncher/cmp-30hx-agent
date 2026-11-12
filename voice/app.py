@@ -107,6 +107,36 @@ class Turn:
         last_text = ""
         emitted_any = False
 
+        # Быстрые команды (музыка/видео/сайт) выполняем без генерации: 9B не
+        # всегда выбирает инструмент на короткую фразу, а голосовой ответ нужен
+        # сразу. Всё остальное идёт обычным путём через модель.
+        routed = tools.route_action(user_text) if config.tools_enabled() else None
+        if routed is not None:
+            name, args = routed
+            await self.session.send({"type": "tool_call", "name": name, "args": args})
+            result = await asyncio.get_running_loop().run_in_executor(
+                None, tools.execute, name, args)
+            action, clean = tools.split_action(result)
+            if action is not None:
+                url = str(action.get("url", ""))
+                if tools.action_url_allowed(url):
+                    await self.session.send({"type": "action", **action})
+                else:
+                    log.warning("action: домен не разрешён: %s", url)
+                result = clean or result
+            await self.session.send({"type": "tool_result", "name": name,
+                                     "result": result[:600]})
+            self.answer = result
+            await self.session.send({"type": "ans_token", "text": result})
+            self.session.history = (
+                base_hist
+                + [{"role": "user", "content": self.text},
+                   {"role": "assistant", "content": result}]
+            )
+            self.session.enqueue_tts(result)
+            log.info("route_action: %s %s", name, args)
+            return
+
         while rounds < max_rounds:
             rounds += 1
             await self.session.send({"type": "gen_start", "round": rounds})

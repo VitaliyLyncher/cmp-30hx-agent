@@ -522,6 +522,57 @@ def action_url_allowed(url: str) -> bool:
     return _allowed_url(url)
 
 
+# ---------------------------------------------------------------------------
+# Детерминированный роутер простых голосовых команд
+# ---------------------------------------------------------------------------
+# Модель 9B не всегда вызывает инструмент на короткую команду («выключи музыку»),
+# поэтому очевидные сценарии обрабатываем без генерации: быстрее и предсказуемо.
+_STOP_RE = re.compile(r"\b(выключи|останови|остановить|стоп|прекрати)\b.*"
+                      r"\b(музык\w*|трек\w*|песн\w*|играет|играй)\b", re.I)
+_PLAY_RE = re.compile(r"\b(включи|поставь|сыграй|запусти)\b\s*"
+                      r"(?:мне\s+)?(?:какую-нибудь\s+)?(.*)", re.I)
+_VIDEO_RE = re.compile(r"\b(найди|покажи|включи|открой)\b\s*"
+                       r"(?:мне\s+)?(?:видео|ролик|клип|фильм)\s*(.*)", re.I)
+_SITE_RE = re.compile(r"\b(открой|перейди|зайди)\b\s*(?:сайт\s+)?"
+                      r"((?:https?://)?[\w.-]+\.[a-z]{2,}(?:/\S*)?)", re.I)
+_MEDIA_WORDS = re.compile(r"\b(видео|ролик|клип|фильм|ютуб|youtube)\b", re.I)
+_MUSIC_WORDS = re.compile(r"\b(музык\w*|песн\w*|трек\w*|альбом\w*|плейлист\w*)\b", re.I)
+
+
+def route_action(text: str) -> tuple[str, dict] | None:
+    """Простая команда -> (инструмент, аргументы). None — отдать модели."""
+    t = (text or "").strip()
+    if not t or not config.tools_enabled():
+        return None
+    if _STOP_RE.search(t):
+        return "stop_music", {}
+
+    m = _VIDEO_RE.match(t)
+    if m:
+        q = m.group(2).strip(" .,!-—")
+        if q:
+            q = re.sub(r"^(про|о|об)\s+", "", q, flags=re.I)
+            return "video_search", {"query": q}
+        return None
+
+    m = _PLAY_RE.match(t)
+    if m:
+        rest = m.group(2).strip(" .,!-—")
+        if _MEDIA_WORDS.search(t) and not _MUSIC_WORDS.search(t):
+            return None
+        if _MUSIC_WORDS.search(t):
+            # «включи музыку рамштайн» -> убрать слово «музыку» из запроса
+            q = _MUSIC_WORDS.sub(" ", rest).strip(" .,!-—")
+            return "play_music", {"query": q or "популярные песни"}
+        if rest and not _SITE_RE.search(t):
+            return "play_music", {"query": rest}
+
+    m = _SITE_RE.search(t)
+    if m:
+        return "open_site", {"target": m.group(2)}
+    return None
+
+
 # --- воспроизведение на этом ПК (yt-dlp -> ffplay, звук через WSLg PulseAudio) --
 _player: dict = {"proc": None, "title": ""}
 _player_lock = threading.Lock()
