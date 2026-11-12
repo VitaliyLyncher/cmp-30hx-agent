@@ -150,6 +150,34 @@
 Проверка `tests/test_play.py` (живая, mpv): пауза/продолжить, громкость 40→50,
 next, stop, локальный трек «Тестовая мелодия» — **ИТОГ: OK**.
 
+### Скачивание треков в «Музыку» (12.11.2026)
+
+Команда **«скачай трек … в Музыку»** (голосом или текстом):
+
+- без генерации роутер ловит «скачай/загрузи/сохрани … [в музыку]» и вызывает
+  `download_track`;
+- источник — **SoundCloud** (`scsearch1:` через yt-dlp) или **archive.org**
+  (public domain/CC, поиск через advancedsearch API); если передан URL — только
+  из белого списка `DOWNLOAD_DOMAINS` (soundcloud.com, bandcamp.com, archive.org,
+  jamendo.com, freemusicarchive.org, ccmixter.org);
+- сохраняет **mp3 320 kbps** с ID3-метаданными в `MUSIC_DIR`
+  (`C:\Users\Administrator\Music`), имя — из названия трека;
+- лимиты: `DOWNLOAD_MAX_MB=60`, `DOWNLOAD_MAX_MINUTES=15`, `DOWNLOAD_TIMEOUT=300`;
+- после скачивания трек сразу попадает **в историю панели** (source `local`),
+  откуда его можно лайкнуть и включить.
+
+Проверка: `tests/test_download.py` (временная папка, mp3 + запись в историю) —
+**ИТОГ: OK**; `tests/test_download_ws.py` (через WebSocket: «скачай трек … в музыку»)
+— **ИТОГ: OK**, файл `Sneaky Snitch.mp3` появился в папке «Музыка», запись в панели
+создана. Docker: папка музыки теперь монтируется **rw** (иначе скачивание в
+контейнере не работает), в образе есть `yt-dlp`.
+
+**Pitfall (12.11.2026):** после загрузки ПК systemd-сервисы видели `/mnt/c`
+**read-only** (`touch: Permission denied`, `stat` показывал `dr-xr-xr-x`), хотя из
+SSH-сессии запись работала — это был устаревший 9p-mount в namespace systemd.
+Лечение: `wsl.exe --shutdown` и повторный запуск дистрибутива; после этого
+`cmp-write` тест из systemd-сервиса дал `WRITE_OK`, скачивание заработало.
+
 ### Панель «Музыка» (12.11.2026)
 
 В интерфейсе появилась карточка **Музыка**:
