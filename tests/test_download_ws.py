@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 """Проверка команды «скачай трек …» через живой WebSocket-сервис.
 
 Скачивает короткий CC-трек в реальную папку «Музыка», проверяет файл и запись
@@ -26,6 +26,7 @@ def check(name: str, cond: bool, extra: str = "") -> None:
 
 async def main() -> int:
     before = {p.name for p in MUSIC.glob("*.mp3")} if MUSIC.is_dir() else set()
+    started = time.time()
     async with websockets.connect(WS, max_size=8 * 1024 * 1024) as ws:
         await ws.send(json.dumps({"type": "text",
                                   "text": "скачай трек Kevin MacLeod Sneaky Snitch в музыку"}))
@@ -60,12 +61,15 @@ async def main() -> int:
                 break
     after = {p.name for p in MUSIC.glob("*.mp3")}
     new = after - before
-    check("новый mp3 в папке Музыка", bool(new), str(new))
+    # файл мог уже существовать (повторный запуск) — тогда смотрим mtime
+    fresh = [p for p in MUSIC.glob("*.mp3") if p.stat().st_mtime >= started - 5]
+    check("mp3 в папке Музыка (новый или обновлённый)", bool(new or fresh),
+          f"new={new} fresh={[p.name for p in fresh]}")
     if st:
         hist = st.get("history") or []
+        stems = {p.stem for p in MUSIC.glob("*.mp3")}
         check("трек в истории панели",
-              any(h.get("source") == "local" and h.get("title") in
-                  {Path(n).stem for n in new} for h in hist),
+              any(h.get("source") == "local" and h.get("title") in stems for h in hist),
               str(hist[:3]))
         # чистим историю от тестовой записи
         for h in hist:
