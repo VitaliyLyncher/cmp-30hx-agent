@@ -367,8 +367,15 @@ class Session:
                     continue
                 if self.turn_detector.should_finalize():
                     self.turn_detector.fired = True
-                    log.info("smart turn: закрываю фразу (hold=%.0f мс, text=%r)",
-                             self.turn_detector.hold_ms(), self.turn_detector.text[-60:])
+                    d = self.turn_detector
+                    now = time.monotonic()
+                    log.info("smart turn: закрываю (hold=%.0f, silence=%.0f, "
+                             "since_change=%.0f, speech_age=%.0f, text=%r)",
+                             d.hold_ms(),
+                             (now - d.silence_since) * 1000 if d.silence_since else -1,
+                             (now - d.last_change) * 1000 if d.last_change else -1,
+                             (now - d.speech_started_at) * 1000 if d.speech_started_at else -1,
+                             d.text[-60:])
                     self.asr.request_finish()
             except Exception as e:  # noqa: BLE001
                 log.warning("turn loop: %s", e)
