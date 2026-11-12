@@ -77,7 +77,9 @@ class TurnDetector:
             self.last_change = now
             if not self.speech_started_at:
                 self.speech_started_at = now
-            self.silence_since = 0.0
+            # ВАЖНО: silence_since здесь НЕ сбрасываем. CTC иногда дописывает
+            # текст уже после того, как VAD увидел тишину; сброс обнулял бы
+            # таймер паузы и закрытие фразы откладывалось до max_ms.
             self.fired = False
 
     def on_silence(self, now: float | None = None) -> None:
