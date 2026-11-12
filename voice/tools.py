@@ -559,6 +559,15 @@ def route_action(text: str) -> tuple[str, dict] | None:
     if _STOP_RE.search(t):
         return "stop_music", {}
 
+    m = re.match(r"\s*(?:скачай|загрузи|сохрани)\b\s*(?:мне\s+)?"
+                 r"(?:трек|песню|музыку|альбом)?\s*(.*)", t, re.I)
+    if m:
+        q = re.sub(r"\s+(?:в|во)\s+(?:музыку|папку(?:\s+музыка)?)\s*$", "",
+                   m.group(1).strip(), flags=re.I)
+        q = q.strip(" .,!-—")
+        if q:
+            return "download_track", {"query": q}
+
     if _PAUSE_RE.search(t):
         return "pause_music", {}
     if _RESUME_RE.search(t):
@@ -1191,6 +1200,96 @@ def music_snapshot() -> dict:
     }
 
 
+def _sanitize_name(name: str) -> str:
+    s = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", name or "").strip(" .")
+    return s[:120] or "track"
+
+
+def _download_allowed(url: str) -> bool:
+    host = (urllib.parse.urlparse(url).hostname or "").lower()
+    if not host:
+        return False
+    return any(host == d or host.endswith("." + d) for d in config.download_domains())
+
+
+def _archive_search_url(query: str) -> str | None:
+    """Первый подходящий аудио-элемент archive.org (public domain/CC)."""
+    q = urllib.parse.quote(query)
+    url = ("https://archive.org/advancedsearch.php?q=" + q +
+           "+AND+mediatype%3A%28audio%29&fl%5B%5D=identifier&rows=5"
+           "&page=1&output=json")
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": _UA})
+        with urllib.request.urlopen(req, timeout=20) as r:
+            data = json.loads(r.read().decode("utf-8", errors="replace"))
+        docs = (data.get("response") or {}).get("docs") or []
+        for d in docs:
+            ident = d.get("identifier")
+            if ident:
+                return f"https://archive.org/details/{ident}"
+    except (OSError, ValueError) as e:  # noqa: BLE001
+        log.debug("archive search: %s", e)
+    return None
+
+
+def download_track(query: str) -> str:
+    """Скачать трек в папку «Музыка» (SoundCloud/archive.org, легальные источники)."""
+    if not config.download_enabled():
+        return "Скачивание выключено (DOWNLOAD_ENABLED=0)."
+    q = (query or "").strip()
+    if not q:
+        return "Не понял, какой трек скачать. Повторите название."
+    out_dir = music_dir()
+    try:
+        out_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as e:  # noqa: BLE001
+        return f"Папка музыки недоступна: {e.__class__.__name__}"
+
+    targets: list[str] = []
+    if re.match(r"^https?://", q, re.I):
+        if not _download_allowed(q):
+            return ("Этот домен не в списке разрешённых для скачивания "
+                    "(DOWNLOAD_DOMAINS).")
+        targets.append(q)
+    else:
+        targets.append("scsearch1:" + q)          # SoundCloud: поиск и загрузка
+        arch = _archive_search_url(q)             # архив: public domain / CC
+        if arch:
+            targets.append(arch)
+
+    last_err = ""
+    for target in targets:
+        cmd = [sys.executable, "-m", "yt_dlp", "--no-playlist", "--no-warnings",
+               "--no-progress", "--no-simulate",
+               "-x", "--audio-format", "mp3", "--audio-quality", "0",
+               "--embed-metadata",
+               "--max-filesize", f"{config.download_max_mb()}M",
+               "--match-filter", f"duration < {int(config.download_max_minutes() * 60)}",
+               "--print", "after_move:filepath",
+               "-o", str(out_dir / "%(title).80s.%(ext)s"),
+               target]
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True,
+                               timeout=config.download_timeout(), env=_pulse_env())
+        except subprocess.TimeoutExpired:
+            last_err = "скачивание не уложилось в таймаут"
+            continue
+        files = [ln.strip() for ln in (r.stdout or "").splitlines()
+                 if ln.strip() and os.path.isfile(ln.strip())]
+        if r.returncode == 0 and files:
+            path = files[-1]
+            title = Path(path).stem
+            size_mb = os.path.getsize(path) / (1024 * 1024)
+            _record(title, "local", path, q)
+            log.info("download_track: %s -> %s", q, path)
+            return (f"Скачал «{title}» в папку «{out_dir.name}» "
+                    f"({size_mb:.1f} МБ).")
+        tail = (r.stderr or "").strip().splitlines()
+        last_err = tail[-1][:160] if tail else f"код {r.returncode}"
+        log.warning("download_track: %s не удалось (%s): %s", target, last_err, q)
+    return f"Не смог скачать «{q}»: {last_err or 'источник не найден'}."
+
+
 def open_site(target: str) -> str:
     t = (target or "").strip()
     if not t:
@@ -1297,6 +1396,14 @@ TOOL_SPECS: list[dict] = [
         "description": "Включить треки из избранного (те, что отмечены ♥ в панели).",
         "parameters": {"type": "object", "properties": {}}}},
     {"type": "function", "function": {
+        "name": "download_track",
+        "description": "Скачать трек в папку «Музыка» в формате mp3. Ищет на SoundCloud "
+                       "и в архиве archive.org (легальные/CC источники), пишет трек в панель. "
+                       "Вызывай на «скачай трек/песню … в Музыку».",
+        "parameters": {"type": "object", "properties": {
+            "query": {"type": "string", "description": "название трека/исполнителя или ссылка"},
+        }, "required": ["query"]}}},
+    {"type": "function", "function": {
         "name": "music_search",
         "description": "Открыть музыкальный сервис в браузере (без воспроизведения здесь). "
                        "Используй только если просят именно открыть сайт/сервис.",
@@ -1340,6 +1447,7 @@ _REGISTRY = {
     "set_volume": lambda a: set_volume(str(a.get("level", "+10"))),
     "music_status": lambda a: music_status(),
     "play_favorites": lambda a: music_play_favorites().get("msg") or "Включаю избранное.",
+    "download_track": lambda a: download_track(str(a.get("query", ""))),
 }
 
 

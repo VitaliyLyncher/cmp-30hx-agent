@@ -100,6 +100,17 @@ def main() -> int:
     r = tools.route_action("включи мою музыку тестовую")
     check("роутер: локальная с запросом",
           r is not None and r[0] == "play_local" and "тестов" in r[1].get("query", ""), str(r))
+    r = tools.route_action("скачай трек Rammstein Sonne в музыку")
+    check("роутер: скачать трек",
+          r == ("download_track", {"query": "Rammstein Sonne"}), str(r))
+    r = tools.route_action("скачай https://soundcloud.com/artist/track")
+    check("роутер: скачать по ссылке",
+          r is not None and r[0] == "download_track"
+          and r[1].get("query", "").startswith("https://"), str(r))
+    check("скачивание: soundcloud разрешён",
+          tools._download_allowed("https://soundcloud.com/a/b"))
+    check("скачивание: чужой домен запрещён",
+          not tools._download_allowed("https://evil.example.com/track.mp3"))
 
     print()
     print("ИТОГ:", "OK" if FAILS == 0 else f"{FAILS} FAIL")

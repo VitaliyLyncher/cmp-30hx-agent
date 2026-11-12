@@ -236,6 +236,23 @@ def music_playlist_size() -> int: return i("MUSIC_PLAYLIST_SIZE", 5)
 # когда юнит запущен не от root (Permission denied на mkdir).
 def music_state_file() -> str:
     return s("MUSIC_STATE_FILE", str(HOME / ".cache" / "cmp-voice" / "music.json"))
+
+
+# --- Скачивание треков -------------------------------------------------------
+def download_enabled() -> bool: return b("DOWNLOAD_ENABLED", True)
+
+
+# только эти домены разрешено скачивать (плюс поиск SoundCloud через scsearch)
+def download_domains() -> list[str]:
+    raw = s("DOWNLOAD_DOMAINS",
+            "soundcloud.com,bandcamp.com,archive.org,jamendo.com,"
+            "freemusicarchive.org,ccmixter.org")
+    return [d.strip().lower() for d in raw.split(",") if d.strip()]
+
+
+def download_timeout() -> float: return f("DOWNLOAD_TIMEOUT", 300.0)
+def download_max_mb() -> int: return i("DOWNLOAD_MAX_MB", 60)
+def download_max_minutes() -> int: return i("DOWNLOAD_MAX_MINUTES", 15)
 # Домены, которые разрешено открывать действием (через запятую)
 def action_domains() -> list[str]:
     raw = s("ACTION_DOMAINS",

@@ -1,4 +1,4 @@
-# docker-compose.yml — «одна команда» для cmp-voice.
+﻿# docker-compose.yml — «одна команда» для cmp-voice.
 #
 # Перед запуском (один раз) соберите на хосте:
 #   bash scripts/build_llama.sh        # или ручная сборка форка prisma
@@ -48,7 +48,7 @@ services:
       - "${CMP_ENV:?путь к .env}:/app/.env:ro"
       # звук через WSLg и локальная папка с музыкой
       - "/mnt/wslg:/mnt/wslg:ro"
-      - "${CMP_MUSIC_DIR:-/mnt/c/Users/Administrator/Music}:/music:ro"
+      - "${CMP_MUSIC_DIR:-/mnt/c/Users/Administrator/Music}:/music"
       # история прослушивания и лайки панели «Музыка» — переживают пересоздание
       - "${CMP_MUSIC_STATE:-/var/lib/cmp-voice-music}:/var/lib/cmp-voice"
     deploy:
