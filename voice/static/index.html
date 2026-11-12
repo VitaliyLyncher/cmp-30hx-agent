@@ -97,6 +97,9 @@ input[type=checkbox]{accent-color:var(--acc);width:15px;height:15px}
           <button data-eng="kokoro">kokoro</button>
         </div>
         <select id="selVoice" title="голос озвучки" style="max-width:150px"></select>
+        <label style="display:flex;align-items:center;gap:4px;font-size:13px" title="не нужно нажимать кнопку перед каждой фразой">
+          <input type="checkbox" id="chkWake"> wake word
+        </label>
         <button id="btnReset" title="сбросить историю, база остаётся в KV">Сброс</button>
       </div>
       <div class="hint" id="micHint"></div>
@@ -159,7 +162,8 @@ const $ = (id) => document.getElementById(id);
 const el = {
   status: $("status"), llmpill: $("llmpill"), ttcinfo: $("ttcinfo"),
   btnTalk: $("btnTalk"), dot: $("dot"), state: $("state"),
-  segTTS: $("segTTS"), selVoice: $("selVoice"), btnReset: $("btnReset"), micHint: $("micHint"),
+  segTTS: $("segTTS"), selVoice: $("selVoice"), chkWake: $("chkWake"),
+  btnReset: $("btnReset"), micHint: $("micHint"),
   partial: $("partial"), answer: $("answer"), genmeta: $("genmeta"),
   txt: $("txt"), btnSend: $("btnSend"), wordMode: $("wordMode"),
   wordBuf: $("wordBuf"), modeHint: $("modeHint"), chips: $("chips"),
@@ -170,6 +174,8 @@ const el = {
 
 let ws = null, audioCtx = null, micStream = null, workletNode = null, srcNode = null;
 let playCtx = null, nextPlayTime = 0, sampleRate = 24000;
+let playingSources = new Set();   // активные источники озвучки (для перебивания)
+let micAnalyser = null, vadTimer = null, vadLoud = 0, wakeOn = false;
 let busy = false, partialCount = 0, kvRows = 0, currentTTS = "silero";
 let cfg = {};   // последний ответ /config (движки и их голоса)
 let currentVoice = "";   // выбранный голос для currentTTS
@@ -253,6 +259,12 @@ async function loadConfig() {
       currentTTS = c.tts_active;
     }
     fillVoices();
+    const wk = c.wakeword || {};
+    el.chkWake.disabled = !wk.enabled;
+    el.chkWake.title = wk.enabled
+      ? `ключевое слово «${wk.model}», порог ${wk.threshold}`
+      : "wake word выключен в конфиге (WAKEWORD_ENABLED=0)";
+    if (wk.enabled && localStorage.getItem("wake") === "1") el.chkWake.checked = true;
     el.modeHint.textContent = c.tools_enabled
       ? "Enter отправляет всю фразу целиком: prefill + генерация. Инструменты включены."
       : "Enter отправляет всю фразу целиком. Инструменты выключены (VOICE_TOOLS_ENABLED=0).";
@@ -297,6 +309,9 @@ function connect() {
     ws.send(JSON.stringify({ type: "stat" }));
     ws.send(JSON.stringify({ type: "tts_engine", engine: currentTTS }));
     if (currentVoice) ws.send(JSON.stringify({ type: "tts_voice", voice: currentVoice }));
+    if (el.chkWake.checked && !el.chkWake.disabled) {
+      ws.send(JSON.stringify({ type: "wake_mode", enabled: true }));
+    }
   };
 
   ws.onclose = () => {
@@ -398,6 +413,22 @@ function handle(m) {
       if (currentVoice) localStorage.setItem("ttsvoice:" + m.engine, currentVoice);
       if (el.selVoice.value !== currentVoice) el.selVoice.value = currentVoice;
       logEvent(`голос: ${currentVoice}`, "okc");
+      break;
+    case "interrupted":
+      stopPlayback();
+      logEvent("ответ прерван", "warnc");
+      break;
+    case "wake":
+      logEvent(`услышал «${m.word || "wake word"}» — слушаю`, "okc");
+      setState("слушаю…", true);
+      break;
+    case "wake_mode_set":
+      wakeOn = !!m.enabled;
+      el.chkWake.checked = wakeOn;
+      logEvent(wakeOn ? `wake word включён («${m.word}»)` : `wake word выключен${m.reason ? ": " + m.reason : ""}`,
+               wakeOn ? "okc" : "warnc");
+      break;
+    case "speech_start":
       break;
     case "audio_meta":
       sampleRate = m.sample_rate || 24000;
@@ -543,6 +574,49 @@ function playChunk(buf) {
   const t = Math.max(ctx.currentTime + 0.02, nextPlayTime);
   src.start(t);
   nextPlayTime = t + ab.duration;
+  playingSources.add(src);
+  src.onended = () => playingSources.delete(src);
+}
+
+function stopPlayback() {
+  for (const s of playingSources) { try { s.stop(); } catch {} }
+  playingSources.clear();
+  nextPlayTime = 0;
+}
+
+// Перебивание: пока играет голос ассистента, следим за микрофоном.
+// Порог по RMS подобран под echoCancellation: собственный голос бота гасится,
+// живая речь пользователя — нет.
+function startBargeWatch() {
+  if (!micAnalyser || vadTimer) return;
+  const buf = new Float32Array(micAnalyser.fftSize);
+  vadTimer = setInterval(() => {
+    if (!playingSources.size) { vadLoud = 0; return; }
+    micAnalyser.getFloatTimeDomainData(buf);
+    let sum = 0;
+    for (let i = 0; i < buf.length; i++) sum += buf[i] * buf[i];
+    const rms = Math.sqrt(sum / buf.length);
+    if (rms > 0.022) {
+      vadLoud++;
+      if (vadLoud >= 3) {   // ~180 мс речи поверх ответа
+        vadLoud = 0;
+        bargeIn();
+      }
+    } else {
+      vadLoud = 0;
+    }
+  }, 60);
+}
+
+function bargeIn() {
+  logEvent("перебивание: заговорил поверх ответа", "warnc");
+  stopPlayback();
+  send({ type: "barge_in" });
+}
+
+function stopBargeWatch() {
+  if (vadTimer) { clearInterval(vadTimer); vadTimer = null; }
+  vadLoud = 0;
 }
 
 // ------------------------------------------------------------------ микрофон
@@ -597,6 +671,9 @@ async function startMic() {
   await audioCtx.audioWorklet.addModule(URL.createObjectURL(blob));
 
   srcNode = audioCtx.createMediaStreamSource(micStream);
+  micAnalyser = audioCtx.createAnalyser();
+  micAnalyser.fftSize = 1024;
+  srcNode.connect(micAnalyser);
   workletNode = new AudioWorkletNode(audioCtx, "cap");
   workletNode.port.onmessage = (ev) => {
     if (ws && ws.readyState === WebSocket.OPEN && !busy) ws.send(ev.data);
@@ -606,12 +683,16 @@ async function startMic() {
   const mute = audioCtx.createGain();
   mute.gain.value = 0;
   workletNode.connect(mute).connect(audioCtx.destination);
+  startBargeWatch();
   return true;
 }
 
 async function stopMic() {
+  stopBargeWatch();
+  stopPlayback();
   if (workletNode) { try { workletNode.disconnect(); } catch {} workletNode = null; }
   if (srcNode) { try { srcNode.disconnect(); } catch {} srcNode = null; }
+  micAnalyser = null;
   if (micStream) { micStream.getTracks().forEach(t => t.stop()); micStream = null; }
   if (audioCtx) { try { await audioCtx.close(); } catch {} audioCtx = null; }
 }
@@ -631,7 +712,9 @@ el.btnTalk.onclick = async () => {
   send({ type: "start" });
   el.btnTalk.textContent = "■ Остановить";
   el.btnTalk.classList.add("rec");
-  el.micHint.textContent = "микрофон активен; пауза 1.2–2.4 с завершает фразу";
+  el.micHint.textContent = el.chkWake.checked
+    ? "микрофон активен; скажите ключевое слово, затем фразу"
+    : "микрофон активен; умная пауза закрывает фразу сама";
 };
 
 el.segTTS.onclick = (ev) => {
@@ -652,6 +735,12 @@ el.selVoice.onchange = () => {
   currentVoice = v;
   localStorage.setItem("ttsvoice:" + currentTTS, v);
   send({ type: "tts_voice", voice: v });
+};
+
+el.chkWake.onchange = () => {
+  wakeOn = el.chkWake.checked;
+  localStorage.setItem("wake", wakeOn ? "1" : "0");
+  send({ type: "wake_mode", enabled: wakeOn });
 };
 
 el.btnReset.onclick = () => send({ type: "reset" });

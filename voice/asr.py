@@ -50,6 +50,16 @@ class SessionASR:
         self._utterance_ms = 0.0
         self._t_speech_start: float | None = None
         self._silence_since: float | None = None
+        # --- новое: VAD, smart turn, wake word ---
+        self._lock = threading.Lock()
+        self._finish_req = threading.Event()
+        self._endpoint_mode = config.asr_endpoint_mode()
+        self._speech_active = False
+        self._last_speech = 0.0
+        self._wake_mode = False
+        self._listening = True      # False в wake-режиме, пока не услышали слово
+        self._wake = None
+        self._wake_ready_tried = False
 
     # -- жизненный цикл ---------------------------------------------------
     def _build(self):
@@ -66,7 +76,7 @@ class SessionASR:
             num_threads=self.num_threads,
             sample_rate=SAMPLE_RATE,
             feature_dim=80,
-            enable_endpoint_detection=True,
+            enable_endpoint_detection=(self._endpoint_mode == "sherpa"),
             rule1_min_trailing_silence=config.asr_silence_final(),
             rule2_min_trailing_silence=config.asr_silence_after_text(),
             rule3_min_utterance_length=config.asr_max_utterance(),
@@ -132,44 +142,56 @@ class SessionASR:
             return
         self._loop.call_soon_threadsafe(self._on_event, ev)
 
-    def _worker(self) -> None:
-        assert self._stream is not None
-        while self._running:
+    # -- wake word --------------------------------------------------------
+    def set_wake_mode(self, enabled: bool) -> None:
+        """Включить/выключить режим ожидания ключевого слова."""
+        self._wake_mode = bool(enabled)
+        self._listening = not self._wake_mode
+        if self._wake_mode and self._wake is None and not self._wake_ready_tried:
+            self._wake_ready_tried = True
             try:
-                chunk = self._queue.get(timeout=0.1)
-            except queue.Empty:
-                continue
-            try:
-                samples = np.frombuffer(chunk, dtype=np.int16).astype(np.float32) / 32768.0
-                self._stream.accept_waveform(SAMPLE_RATE, samples)
-                self._utterance_ms += len(samples) / SAMPLE_RATE * 1000.0
-
-                while self._recognizer.is_ready(self._stream):
-                    self._recognizer.decode_stream(self._stream)
-
-                text = self._recognizer.get_result(self._stream).strip()
-                if text and text != self._last_text:
-                    self._last_text = text
-                    self._emit({"type": "partial", "text": text,
-                                "utterance_ms": self._utterance_ms})
-
-                if self._recognizer.is_endpoint(self._stream):
-                    if self._last_text:
-                        self._emit({"type": "final", "text": self._last_text,
-                                    "utterance_ms": self._utterance_ms})
-                    self._recognizer.reset(self._stream)
-                    self._last_text = ""
-                    self._utterance_ms = 0.0
+                from .wakeword import build_detector
+                self._wake = build_detector()
+                if self._wake is None:
+                    log.warning("wake word недоступен (нет openwakeword/модели) — режим выключен")
+                    self._wake_mode = False
+                    self._listening = True
             except Exception as e:  # noqa: BLE001
-                log.warning("ASR worker: %s", e)
+                log.warning("wake word: %s", e)
+                self._wake_mode = False
+                self._listening = True
+
+    def _check_wake(self, samples: np.ndarray) -> bool:
+        if self._wake is None:
+            return False
+        try:
+            return bool(self._wake.feed(samples))
+        except Exception as e:  # noqa: BLE001
+            log.warning("wake feed: %s", e)
+            return False
 
     # -- завершение фразы -------------------------------------------------
+    def request_finish(self) -> None:
+        """Потокобезопасно попросить воркер закрыть текущую фразу."""
+        self._finish_req.set()
+
     def finish_utterance(self) -> None:
         """Добить хвост тишиной и форсированно закрыть вход.
 
         Без этого модель теряет последние ~1 с речи — свойство модели.
         """
+        self.request_finish()
+        # дать воркеру шанс обработать; если он стоит — закрываем сами
+        for _ in range(30):
+            if not self._finish_req.is_set():
+                return
+            time.sleep(0.02)
+        with self._lock:
+            self._finish_locked()
+
+    def _finish_locked(self) -> None:
         if self._stream is None:
+            self._finish_req.clear()
             return
         tail = int(config.asr_tail_silence() * SAMPLE_RATE)
         try:
@@ -178,13 +200,101 @@ class SessionASR:
             assert self._recognizer is not None
             while self._recognizer.is_ready(self._stream):
                 self._recognizer.decode_stream(self._stream)
-            text = self._recognizer.get_result(self._stream).strip()
+            text = self._recognizer.get_result(self._stream).strip() or self._last_text
             if text:
                 self._emit({"type": "final", "text": text,
                             "utterance_ms": self._utterance_ms + config.asr_tail_silence() * 1000})
-            self.reset_stream()
+            self._new_stream_locked()
+            if self._wake_mode:
+                self._listening = False
         except Exception as e:  # noqa: BLE001
             log.warning("ASR finish: %s", e)
+        finally:
+            self._finish_req.clear()
+
+    def _new_stream_locked(self) -> None:
+        """Как _new_stream, но вызывается уже под self._lock."""
+        assert self._recognizer is not None
+        self._stream = self._recognizer.create_stream()
+        lead = int(config.asr_lead_silence() * SAMPLE_RATE)
+        self._stream.accept_waveform(SAMPLE_RATE, np.zeros(lead, dtype=np.float32))
+        self._last_text = ""
+        self._utterance_ms = 0.0
+        self._t_speech_start = None
+        self._silence_since = None
+
+    def _worker(self) -> None:
+        assert self._stream is not None
+        while self._running:
+            try:
+                chunk = self._queue.get(timeout=0.1)
+            except queue.Empty:
+                # даже без аудио надо исполнять отложенный finish
+                if self._finish_req.is_set():
+                    with self._lock:
+                        self._finish_locked()
+                continue
+            try:
+                samples = np.frombuffer(chunk, dtype=np.int16).astype(np.float32) / 32768.0
+                now = time.monotonic()
+
+                # --- wake word: пока не услышали — распознаватель не трогаем
+                if self._wake_mode and not self._listening:
+                    if self._check_wake(samples):
+                        with self._lock:
+                            self._listening = True
+                            self._new_stream_locked()
+                        self._emit({"type": "wake"})
+                    continue
+
+                rms = float(np.sqrt(np.mean(samples * samples))) if samples.size else 0.0
+
+                with self._lock:
+                    if self._finish_req.is_set():
+                        self._finish_locked()
+                        continue
+
+                    # --- VAD: переходы речь/тишина для smart turn
+                    if rms >= config.vad_rms():
+                        self._last_speech = now
+                        if not self._speech_active:
+                            self._speech_active = True
+                            if self._t_speech_start is None:
+                                self._t_speech_start = now
+                            self._emit({"type": "speech_start"})
+                    else:
+                        if (self._speech_active
+                                and (now - self._last_speech) * 1000 >= config.vad_hangover_ms()):
+                            self._speech_active = False
+                            self._silence_since = now
+                            self._emit({"type": "speech_end"})
+
+                    self._stream.accept_waveform(SAMPLE_RATE, samples)
+                    self._utterance_ms += len(samples) / SAMPLE_RATE * 1000.0
+
+                    while self._recognizer.is_ready(self._stream):
+                        self._recognizer.decode_stream(self._stream)
+
+                    text = self._recognizer.get_result(self._stream).strip()
+                    if text and text != self._last_text:
+                        self._last_text = text
+                        self._emit({"type": "partial", "text": text,
+                                    "utterance_ms": self._utterance_ms})
+
+                    if self._endpoint_mode == "sherpa":
+                        if self._recognizer.is_endpoint(self._stream):
+                            if self._last_text:
+                                self._emit({"type": "final", "text": self._last_text,
+                                            "utterance_ms": self._utterance_ms})
+                            self._recognizer.reset(self._stream)
+                            self._last_text = ""
+                            self._utterance_ms = 0.0
+                    elif self._utterance_ms >= config.asr_max_utterance() * 1000:
+                        # жёсткий потолок утилизации — умный детектор обычно
+                        # закрывает фразу раньше, это страховка
+                        self._finish_locked()
+            except Exception as e:  # noqa: BLE001
+                log.warning("ASR worker: %s", e)
 
     def stop(self) -> None:
         self._running = False

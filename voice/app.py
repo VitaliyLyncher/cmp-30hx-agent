@@ -28,6 +28,7 @@ from . import tools  # noqa: E402
 from . import tts as tts_mod  # noqa: E402
 from .asr import SessionASR  # noqa: E402
 from .llm_client import LastWinsPrefill, LLMError, NativeLLM  # noqa: E402
+from .turn import TurnDetector  # noqa: E402
 
 logging.basicConfig(
     level=logging.INFO,
@@ -252,6 +253,19 @@ class Session:
         self.tts_backend_name = tts_registry.active
         # Выбранный голос для текущего движка (None = голос по умолчанию).
         self.tts_voice: str | None = None
+        # Перебивание: воркер TTS прекращает отдавать текущую фразу.
+        self._tts_abort = False
+        # Умное определение конца реплики.
+        self.turn_detector = TurnDetector(
+            min_ms=config.turn_min_ms(),
+            default_ms=config.turn_default_ms(),
+            question_ms=config.turn_question_ms(),
+            dangling_ms=config.turn_dangling_ms(),
+            short_ms=config.turn_short_ms(),
+            max_ms=config.turn_max_ms(),
+        )
+        self._turn_task: asyncio.Task | None = None
+        self._wake_mode = False
         self._closing = False
 
     # -- отправка ---------------------------------------------------------
@@ -284,6 +298,8 @@ class Session:
             try:
                 backend = tts_registry.get(self.tts_backend_name)
                 async for chunk in backend.stream(text, self.tts_voice):
+                    if self._tts_abort:
+                        break
                     if chunk:
                         await self.send({"type": "audio_meta",
                                          "sample_rate": backend.sample_rate})
@@ -315,8 +331,18 @@ class Session:
     # -- ASR события -------------------------------------------------------
     async def on_asr_event(self, ev: dict) -> None:
         kind = ev.get("type")
-        if kind == "partial":
+        if kind == "wake":
+            # услышали ключевое слово: сообщаем клиенту (он сыграет «динь»)
+            await self.send({"type": "wake", "word": config.wakeword_model()})
+            self.turn_detector.on_speech_start()
+        elif kind == "speech_start":
+            self.turn_detector.on_speech_start()
+            await self.send({"type": "speech_start"})
+        elif kind == "speech_end":
+            self.turn_detector.on_silence()
+        elif kind == "partial":
             self.source = "asr"
+            self.turn_detector.on_partial(ev["text"])
             await self.send({"type": "partial", "text": ev["text"],
                              "utterance_ms": ev.get("utterance_ms")})
             if not self.busy:
@@ -325,10 +351,48 @@ class Session:
                                     lambda r: self._on_prefill_stats(r, "asr"))
         elif kind == "final":
             _tools_check["busy"] = False
+            self.turn_detector.reset()
             if self.busy:
                 return
             await self.send({"type": "final", "text": ev["text"]})
             self.spawn_turn(ev["text"], "asr")
+
+    # -- smart turn: раз в 100 мс проверяем, не пора ли закрыть фразу ------
+    async def _turn_loop(self) -> None:
+        while not self._closing:
+            await asyncio.sleep(0.1)
+            try:
+                if self.busy or self.asr is None:
+                    continue
+                if self.turn_detector.should_finalize():
+                    self.turn_detector.fired = True
+                    self.asr.request_finish()
+            except Exception as e:  # noqa: BLE001
+                log.warning("turn loop: %s", e)
+
+    def start_turn_loop(self) -> None:
+        if self._turn_task is None or self._turn_task.done():
+            self._turn_task = asyncio.create_task(self._turn_loop())
+
+    # -- перебивание --------------------------------------------------------
+    async def interrupt(self, reason: str = "barge_in") -> None:
+        """Пользователь заговорил: гасим озвучку и текущий ход."""
+        self._tts_abort = True
+        while not self.tts_q.empty():
+            try:
+                self.tts_q.get_nowait()
+                self.tts_q.task_done()
+            except asyncio.QueueEmpty:
+                break
+        self.tts_pending = 0
+        self.tts_done.set()
+        if self.turn_task is not None and not self.turn_task.done():
+            self.turn_task.cancel()
+        if self.asr is not None:
+            self.asr.reset_stream()
+        self.turn_detector.reset()
+        await self.send({"type": "interrupted", "reason": reason})
+        log.info("перебивание: %s", reason)
 
     async def _on_prefill_stats(self, r: dict, source: str) -> None:
         if not r.get("ok"):
@@ -352,6 +416,7 @@ class Session:
         _tools_check["busy"] = True
         self.source = source
         self.answer_text = ""
+        self._tts_abort = False
         await self.send({"type": "turn_start", "text": text, "source": source})
         self.start_tts_worker()
         await self.prefill.cancel()
@@ -394,6 +459,9 @@ class Session:
             return
         self.asr = SessionASR()
         self.asr.start(lambda ev: asyncio.create_task(self.on_asr_event(ev)))
+        if self._wake_mode:
+            self.asr.set_wake_mode(True)
+        self.start_turn_loop()
 
     def stop_asr(self) -> None:
         if self.asr is None:
@@ -440,6 +508,8 @@ async def health():
         "tts_info": tts_desc,
         "asr": str(config.asr_model_dir()),
         "asr_mode": config.asr_mode(),
+        "asr_endpoint": config.asr_endpoint_mode(),
+        "wakeword": config.wakeword_enabled(),
         "asr_error": _state["asr_error"],
         "tools_token": tools.token_status(),
         "uptime_s": int(time.time() - _state["started_at"]),
@@ -456,6 +526,18 @@ async def cfg():
         "tools_enabled": config.tools_enabled(),
         "max_gen_tokens": config.max_gen_tokens(),
         "max_tool_rounds": config.max_tool_rounds(),
+        "turn": {
+            "mode": config.asr_endpoint_mode(),
+            "min_ms": config.turn_min_ms(),
+            "default_ms": config.turn_default_ms(),
+            "dangling_ms": config.turn_dangling_ms(),
+            "max_ms": config.turn_max_ms(),
+        },
+        "wakeword": {
+            "enabled": config.wakeword_enabled(),
+            "model": config.wakeword_model(),
+            "threshold": config.wakeword_threshold(),
+        },
     }
 
 
@@ -520,6 +602,8 @@ async def ws_endpoint(ws: WebSocket):
         s._closing = True
         if s.turn_task is not None and not s.turn_task.done():
             s.turn_task.cancel()
+        if s._turn_task is not None and not s._turn_task.done():
+            s._turn_task.cancel()
         s.stop_asr()
         await s.stop_tts_worker()
         await s.prefill.cancel()
@@ -590,6 +674,23 @@ async def handle_command(s: Session, cmd: dict) -> None:
         s.tts_voice = name or None
         await s.send({"type": "tts_voice_set", "engine": backend.name,
                       "voice": s.tts_voice or (backend.voices() or [None])[0]})
+
+    elif t == "barge_in":
+        # клиент услышал речь поверх озвучки — гасим ход и аудио
+        await s.interrupt("user_speech")
+
+    elif t == "wake_mode":
+        want = bool(cmd.get("enabled"))
+        if want and not config.wakeword_enabled():
+            await s.send({"type": "wake_mode_set", "enabled": False,
+                          "reason": "wake word выключен в конфиге (WAKEWORD_ENABLED=0)"})
+            return
+        s._wake_mode = want
+        if s.asr is not None:
+            s.asr.set_wake_mode(want)
+        active = bool(s.asr is not None and getattr(s.asr, "_wake_mode", False))
+        await s.send({"type": "wake_mode_set", "enabled": active,
+                      "word": config.wakeword_model()})
 
     elif t == "reset":
         if s.busy:
