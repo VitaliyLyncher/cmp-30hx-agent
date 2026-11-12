@@ -614,7 +614,7 @@ def route_action(text: str) -> tuple[str, dict] | None:
 # mpv выбран вместо ffplay: он умеет плейлист, паузу и громкость через JSON-IPC,
 # то есть поддерживает «пауза», «дальше», «громче» без перезапуска.
 _player: dict = {"proc": None, "items": [], "titles": [], "query": "",
-                 "volume": 80, "sock": None}
+                 "volume": 80, "sock": None, "source": "youtube"}
 _player_lock = threading.Lock()
 _MPV_SOCK = "/tmp/cmp-voice-mpv.sock"
 _AUDIO_EXT = (".mp3", ".flac", ".ogg", ".m4a", ".wav", ".opus", ".aac", ".wma")
@@ -738,12 +738,11 @@ def _start_playlist(items: list[str], titles: list[str], query: str,
         time.sleep(0.05)
     with _player_lock:
         _player.update(proc=proc, items=list(items), titles=list(titles),
-                       query=query, sock=sock)
+                       query=query, sock=sock, source=source)
     if proc.poll() is not None:
         return "Плеер сразу завершился — возможно, нет доступа к звуку."
-    # в историю панели — каждый трек очереди
-    for title, item in zip(titles, items):
-        _record(title, source, item, query)
+    # в историю — только трек, который реально начал играть
+    _record(titles[0] if titles else query, source, items[0] if items else query, query)
     return None
 
 
@@ -811,6 +810,7 @@ def next_track() -> str:
     if not r or r.get("error") != "success":
         return "Не удалось переключить трек."
     time.sleep(0.3)
+    _record_current()
     t = _current_title()
     return f"Следующий трек{f': «{t}»' if t else ''}."
 
@@ -825,6 +825,7 @@ def prev_track() -> str:
     if not r or r.get("error") != "success":
         return "Не удалось вернуться к предыдущему треку."
     time.sleep(0.3)
+    _record_current()
     t = _current_title()
     return f"Предыдущий трек{f': «{t}»' if t else ''}."
 
@@ -953,13 +954,33 @@ def _save_hist() -> None:
 
 def _record(title: str, source: str, ref: str, query: str = "") -> dict:
     _load_hist()
-    item = {"id": uuid.uuid4().hex[:10], "title": title, "source": source,
-            "ref": ref, "query": query, "ts": time.time()}
     with _hist_lock:
+        # не дублируем подряд одинаковый трек (повторный запуск того же)
+        if _history:
+            last = _history[-1]
+            if (_fav_key(last.get("title", "")) == _fav_key(title)
+                    and last.get("source") == source):
+                last["ts"] = time.time()
+                _save_hist()
+                return dict(last)
+        item = {"id": uuid.uuid4().hex[:10], "title": title, "source": source,
+                "ref": ref, "query": query, "ts": time.time()}
         _history.append(item)
         del _history[:-60]
         _save_hist()
-    return item
+    return dict(item)
+
+
+def _record_current() -> None:
+    """Записать в историю трек, который mpv играет сейчас (после next/prev)."""
+    pos = _ipc_get("playlist-pos")
+    with _player_lock:
+        titles = list(_player.get("titles") or [])
+        items = list(_player.get("items") or [])
+        source = _player.get("source") or "youtube"
+        query = _player.get("query") or ""
+    if isinstance(pos, int) and 0 <= pos < len(titles):
+        _record(titles[pos], source, items[pos] if pos < len(items) else query, query)
 
 
 def _fav_key(title: str) -> str:
