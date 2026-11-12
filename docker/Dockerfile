@@ -10,7 +10,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         python3.12 python3.12-venv python3-pip \
-        ffmpeg libgomp1 libsndfile1 ca-certificates curl \
+        ffmpeg mpv libgomp1 libsndfile1 ca-certificates curl \
         espeak-ng-data \
     && rm -rf /var/lib/apt/lists/*
 

@@ -31,6 +31,10 @@ services:
       BONSAI_MODEL: /models/bonsai9/PQ2_0.gguf
       ASR_MODEL_DIR: /app/tone_asr/sherpa-onnx-streaming-t-one-russian-2025-09-08
       SILERO_MODEL: /app/models/silero/v5_6_ru.pt
+      # звук и музыка внутри контейнера: WSLg PulseAudio + папка «Музыка»
+      PULSE_SERVER: unix:/mnt/wslg/PulseServer
+      MUSIC_DIR: /music
+      MUSIC_PLAYBACK: host
     volumes:
       # модели
       - "${CMP_MODELS_DIR:?путь к ~/models}:/models:ro"
@@ -41,6 +45,9 @@ services:
       - "${CMP_DAEMON:?путь к daemon/bonsai_daemon}:/app/daemon/bonsai_daemon:ro"
       # конфиг (тот же .env, что для systemd — монтируем только чтение)
       - "${CMP_ENV:?путь к .env}:/app/.env:ro"
+      # звук через WSLg и локальная папка с музыкой
+      - "/mnt/wslg:/mnt/wslg:ro"
+      - "${CMP_MUSIC_DIR:-/mnt/c/Users/Administrator/Music}:/music:ro"
     deploy:
       resources:
         reservations:

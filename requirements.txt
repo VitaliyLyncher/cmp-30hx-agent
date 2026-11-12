@@ -1,4 +1,4 @@
-# Зависимости voice-сервиса (Python 3.12).
+﻿# Зависимости voice-сервиса (Python 3.12).
 # Версии не зафиксированы: на целевой машине снимите `pip freeze > requirements.lock`
 # и коммитьте lock-файл — иначе сборка невоспроизводима.
 fastapi
@@ -10,6 +10,7 @@ nvidia-cudnn-cu12
 phonemizer
 espeakng-loader
 websockets
+yt-dlp            # поиск и разрешение аудиопотоков YouTube для play_music
 
 # --- отдельное окружение для Silero TTS (.venv-silero) -------------------------
 # torch СТРОГО CPU-сборка: onnxruntime-gpu и torch в одном процессе конфликтуют
