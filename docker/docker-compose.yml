@@ -48,6 +48,8 @@ services:
       # звук через WSLg и локальная папка с музыкой
       - "/mnt/wslg:/mnt/wslg:ro"
       - "${CMP_MUSIC_DIR:-/mnt/c/Users/Administrator/Music}:/music:ro"
+      # история прослушивания и лайки панели «Музыка» — переживают пересоздание
+      - "${CMP_MUSIC_STATE:-/var/lib/cmp-voice-music}:/var/lib/cmp-voice"
     deploy:
       resources:
         reservations:

@@ -18,6 +18,9 @@ export BONSAI_MODEL ASR_MODEL_DIR SILERO_MODEL TTS_SILERO_URL
 [ -d "$ASR_MODEL_DIR" ] || { echo "нет модели ASR: $ASR_MODEL_DIR"; exit 1; }
 [ -f "$ROOT/daemon/bonsai_daemon" ] || { echo "нет демона: /app/daemon/bonsai_daemon (смонтируйте собранный)"; exit 1; }
 
+# состояние панели «Музыка» (история/лайки) — в примонтированный том
+mkdir -p /var/lib/cmp-voice 2>/dev/null || true
+
 pids=()
 shutdown() {
     echo "[entrypoint] остановка…"
