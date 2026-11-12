@@ -14,6 +14,10 @@ import json
 import logging
 import os
 import re
+import shutil
+import subprocess
+import sys
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -518,6 +522,95 @@ def action_url_allowed(url: str) -> bool:
     return _allowed_url(url)
 
 
+# --- воспроизведение на этом ПК (yt-dlp -> ffplay, звук через WSLg PulseAudio) --
+_player: dict = {"proc": None, "title": ""}
+_player_lock = threading.Lock()
+
+
+def _pulse_env() -> dict:
+    env = os.environ.copy()
+    # systemd-сервис не всегда наследует WSLg-переменные: добавляем сами
+    if not env.get("PULSE_SERVER") and os.path.exists("/mnt/wslg/PulseServer"):
+        env["PULSE_SERVER"] = "unix:/mnt/wslg/PulseServer"
+    if not env.get("XDG_RUNTIME_DIR"):
+        env["XDG_RUNTIME_DIR"] = "/run/user/0"
+    return env
+
+
+def _resolve_audio(query: str) -> str:
+    """Первый результат YouTube -> прямой URL аудиопотока."""
+    cmd = [sys.executable, "-m", "yt_dlp", "--no-playlist", "--no-warnings",
+           "--default-search", "ytsearch1",
+           "-f", "bestaudio[ext=m4a]/bestaudio", "-g", query]
+    r = subprocess.run(cmd, capture_output=True, text=True,
+                       timeout=config.ytdlp_timeout(), env=_pulse_env())
+    urls = [ln.strip() for ln in (r.stdout or "").splitlines() if ln.strip().startswith("http")]
+    if r.returncode != 0 or not urls:
+        tail = (r.stderr or "").strip().splitlines()
+        raise RuntimeError(tail[-1][:120] if tail else f"код {r.returncode}")
+    return urls[0]
+
+
+def stop_music() -> str:
+    with _player_lock:
+        p = _player.get("proc")
+        title = _player.get("title") or ""
+        _player["proc"] = None
+        _player["title"] = ""
+    if p is None or p.poll() is not None:
+        return "Сейчас ничего не играет."
+    try:
+        p.terminate()
+        try:
+            p.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            p.kill()
+    except OSError:
+        pass
+    return f"Остановил музыку{f' «{title}»' if title else ''}."
+
+
+def music_now_playing() -> str:
+    with _player_lock:
+        p = _player.get("proc")
+        title = _player.get("title") or ""
+    if p is not None and p.poll() is None:
+        return f"Сейчас играет «{title}»."
+    return "Сейчас ничего не играет."
+
+
+def play_music(query: str) -> str:
+    q = (query or "").strip()
+    if not q:
+        return "Не понял, какую музыку включить. Повторите название."
+    if config.music_playback() == "browser":
+        return music_search(q)
+    ffplay = shutil.which("ffplay") or "/usr/bin/ffplay"
+    if not os.path.exists(ffplay):
+        return ("Не могу играть на этом ПК: нет ffplay. "
+                "Установите ffmpeg или поставьте MUSIC_PLAYBACK=browser.")
+    stop_music()
+    try:
+        url = _resolve_audio(q)
+    except subprocess.TimeoutExpired:
+        return f"Поиск «{q}» занял слишком долго. Попробуйте ещё раз."
+    except Exception as e:  # noqa: BLE001
+        return f"Не нашёл трек «{q}»: {e}"
+    try:
+        proc = subprocess.Popen(
+            [ffplay, "-nodisp", "-autoexit", "-loglevel", "error",
+             "-reconnect", "1", "-reconnect_streamed", "1",
+             "-reconnect_delay_max", "5", url],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            env=_pulse_env())
+    except OSError as e:
+        return f"Не удалось запустить плеер: {e.__class__.__name__}"
+    with _player_lock:
+        _player["proc"] = proc
+        _player["title"] = q
+    return f"Включаю «{q}» на этом компьютере."
+
+
 def open_site(target: str) -> str:
     t = (target or "").strip()
     if not t:
@@ -597,6 +690,17 @@ TOOL_SPECS: list[dict] = [
         "parameters": {"type": "object", "properties": {
             "target": {"type": "string", "description": "адрес вида https://… или домен"},
         }, "required": ["target"]}}},
+    {"type": "function", "function": {
+        "name": "play_music",
+        "description": "Включить музыку на этом компьютере (звук из колонок). "
+                       "Вызывай на «включи/поставь/сыграй музыку, песню, трек, исполнителя».",
+        "parameters": {"type": "object", "properties": {
+            "query": {"type": "string", "description": "исполнитель, песня или описание"},
+        }, "required": ["query"]}}},
+    {"type": "function", "function": {
+        "name": "stop_music",
+        "description": "Остановить музыку, которая сейчас играет.",
+        "parameters": {"type": "object", "properties": {}}}},
 ]
 
 _REGISTRY = {
@@ -609,6 +713,8 @@ _REGISTRY = {
     "music_search": lambda a: music_search(str(a.get("query", "")), str(a.get("service", ""))),
     "video_search": lambda a: video_search(str(a.get("query", ""))),
     "open_site": lambda a: open_site(str(a.get("target", ""))),
+    "play_music": lambda a: play_music(str(a.get("query", ""))),
+    "stop_music": lambda a: stop_music(),
 }
 
 
