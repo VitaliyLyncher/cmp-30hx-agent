@@ -668,12 +668,23 @@ TOOL_SPECS: list[dict] = [
             "label": {"type": "string", "description": "название таймера"},
         }}}},
     {"type": "function", "function": {
-        "name": "music_search",
-        "description": "Включить музыку: открыть музыкальный сервис с поиском по "
-                       "исполнителю, песне или жанру. ОБЯЗАТЕЛЬНО вызывай на просьбы "
-                       "«включи/поставь музыку/песню/альбом/исполнителя», «хочу послушать …».",
+        "name": "play_music",
+        "description": "Включить музыку со звуком на этом компьютере. ОБЯЗАТЕЛЬНО вызывай "
+                       "на «включи/поставь/сыграй музыку, песню, трек, исполнителя», "
+                       "«хочу послушать …». Это основной способ включить музыку.",
         "parameters": {"type": "object", "properties": {
-            "query": {"type": "string", "description": "что включить: исполнитель, песня, жанр"},
+            "query": {"type": "string", "description": "исполнитель, песня или описание"},
+        }, "required": ["query"]}}},
+    {"type": "function", "function": {
+        "name": "stop_music",
+        "description": "Остановить музыку, которая сейчас играет.",
+        "parameters": {"type": "object", "properties": {}}}},
+    {"type": "function", "function": {
+        "name": "music_search",
+        "description": "Открыть музыкальный сервис в браузере (без воспроизведения здесь). "
+                       "Используй только если просят именно открыть сайт/сервис.",
+        "parameters": {"type": "object", "properties": {
+            "query": {"type": "string", "description": "что искать: исполнитель, песня, жанр"},
             "service": {"type": "string", "description":
                         "youtube_music | spotify | yandex | soundcloud (по умолчанию из конфига)"},
         }, "required": ["query"]}}},
@@ -690,17 +701,6 @@ TOOL_SPECS: list[dict] = [
         "parameters": {"type": "object", "properties": {
             "target": {"type": "string", "description": "адрес вида https://… или домен"},
         }, "required": ["target"]}}},
-    {"type": "function", "function": {
-        "name": "play_music",
-        "description": "Включить музыку на этом компьютере (звук из колонок). "
-                       "Вызывай на «включи/поставь/сыграй музыку, песню, трек, исполнителя».",
-        "parameters": {"type": "object", "properties": {
-            "query": {"type": "string", "description": "исполнитель, песня или описание"},
-        }, "required": ["query"]}}},
-    {"type": "function", "function": {
-        "name": "stop_music",
-        "description": "Остановить музыку, которая сейчас играет.",
-        "parameters": {"type": "object", "properties": {}}}},
 ]
 
 _REGISTRY = {
