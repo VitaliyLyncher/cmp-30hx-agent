@@ -135,7 +135,13 @@ class TurnDetector:
             return False
         silence_ms = (now - self.silence_since) * 1000
         since_change_ms = (now - self.last_change) * 1000
-        hold = max(self.hold_ms(), silence_ms)  # для наглядности/отладки
+        hold = self.hold_ms()
+        # Обычно ждём, пока текст перестанет меняться (CTC иногда «дописывает»
+        # на тишине). Но не бесконечно: после hold+400 мс тишины закрываем
+        # фразу даже при поздних правках — иначе пауза расползается.
+        if silence_ms >= hold + 400:
+            self.fired = True
+            return True
         if silence_ms >= hold and since_change_ms >= hold:
             self.fired = True
             return True
