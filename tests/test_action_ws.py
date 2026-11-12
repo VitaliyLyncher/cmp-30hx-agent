@@ -51,8 +51,12 @@ async def main() -> int:
                          ("play_music", "music_search"))
     ok2, ev2 = await ask("найди видео про сборку ПК", ("video_search",),
                          want_action=True)
-    bad = [e for e in ev1 + ev2 if "__ACTION__" in str(e.get("result", ""))]
-    ok = ok1 and ok2 and not bad
+    ok3, ev3 = await ask("выключи музыку", ("stop_music",))
+    ok4, ev4 = await ask("открой сайт youtube.com", ("open_site",),
+                         want_action=True)
+    bad = [e for e in ev1 + ev2 + ev3 + ev4
+           if "__ACTION__" in str(e.get("result", ""))]
+    ok = ok1 and ok2 and ok3 and ok4 and not bad
     print("ИТОГ:", "OK" if ok else "FAIL")
     return 0 if ok else 1
 
