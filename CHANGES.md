@@ -156,8 +156,21 @@ next, stop, локальный трек «Тестовая мелодия» — 
 - В compose примонтированы `/mnt/wslg` (PulseAudio WSLg) и папка «Музыка» как
   `/music`; переменные `PULSE_SERVER`, `MUSIC_DIR=/music`, `MUSIC_PLAYBACK=host`,
   `CMP_MUSIC_DIR` в `docker/.env.example`.
-- Проверка в контейнере: пересборка образа, `up`, `/health`, `tests/test_play.py`
-  и `tests/test_actions.py` внутри контейнера, затем systemd-сервисы возвращены.
+- Проверено в контейнере (`docker_test_play.sh`): образ пересобран, `up`,
+  `/health` = ok, `tests/test_play.py` — **ИТОГ: OK** (mpv жив, пауза/продолжить,
+  громкость 40→50, next, stop, локальный трек «Тестовая мелодия» из `/music`),
+  `tests/test_actions.py` — **ИТОГ: OK**. После теста systemd-сервисы возвращены.
+- Важно: после изменений кода контейнер нужно пересобирать
+  (`docker compose build`) — образ не обновляется сам.
+
+### Pitfall: инструменты пропали после перезагрузки ПК
+
+После ребута `cmp-voice` поднялся с `VOICE_TOOLS_ENABLED=0` из проектного `.env`
+(в `/etc/cmp-voice.env` этой строки не было), поэтому демон остался с базой
+259 токенов и без инструментов. Лечение: `VOICE_TOOLS_ENABLED=1` и одинаковый
+`BONSAI_CTX` в обоих файлах, затем `systemctl restart cmp-voice`.
+Проверено, что после `systemctl restart cmp-llm` инструменты переустанавливаются
+автоматически (`stat_refresher` → `ensure_tools`, база 1543, tools 18).
 
 
 ## Docker-упаковка (12.11.2026)
