@@ -96,7 +96,8 @@ class SessionASR:
         self._running = True
         self._thread = threading.Thread(target=self._worker, name="asr-worker", daemon=True)
         self._thread.start()
-        log.info("ASR-воркер запущен")
+        log.info("ASR-воркер запущен (endpoint=%s, vad_rms=%.3f)",
+                 self._endpoint_mode, config.vad_rms())
 
     def _new_stream(self) -> None:
         assert self._recognizer is not None
@@ -202,6 +203,7 @@ class SessionASR:
                 self._recognizer.decode_stream(self._stream)
             text = self._recognizer.get_result(self._stream).strip() or self._last_text
             if text:
+                log.info("ASR finish: «%s» (%.0f мс)", text[:60], self._utterance_ms)
                 self._emit({"type": "final", "text": text,
                             "utterance_ms": self._utterance_ms + config.asr_tail_silence() * 1000})
             self._new_stream_locked()
@@ -261,12 +263,15 @@ class SessionASR:
                             self._speech_active = True
                             if self._t_speech_start is None:
                                 self._t_speech_start = now
+                            log.info("VAD: речь (rms=%.3f)", rms)
                             self._emit({"type": "speech_start"})
                     else:
                         if (self._speech_active
                                 and (now - self._last_speech) * 1000 >= config.vad_hangover_ms()):
                             self._speech_active = False
                             self._silence_since = now
+                            log.info("VAD: тишина (%.0f мс после речи)",
+                                     (now - self._last_speech) * 1000)
                             self._emit({"type": "speech_end"})
 
                     self._stream.accept_waveform(SAMPLE_RATE, samples)
