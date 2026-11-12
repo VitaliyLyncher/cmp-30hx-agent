@@ -761,15 +761,13 @@ def stop_music() -> str:
 
 
 def _current_title() -> str:
-    t = _ipc_get("media-title")
-    if t:
-        return str(t)
     with _player_lock:
         titles = _player.get("titles") or []
-        idx = _ipc_get("playlist-pos")
-        if isinstance(idx, int) and 0 <= idx < len(titles):
-            return titles[idx]
-    return ""
+    idx = _ipc_get("playlist-pos")
+    if isinstance(idx, int) and 0 <= idx < len(titles) and titles[idx]:
+        return str(titles[idx])
+    t = _ipc_get("media-title")
+    return str(t) if t else ""
 
 
 def pause_music() -> str:
@@ -833,12 +831,14 @@ def set_volume(level: int | str) -> str:
     cur = int(cur) if isinstance(cur, (int, float)) else int(_player.get("volume", 80))
     if isinstance(level, str):
         low = level.strip().lower()
-        if low in ("+", "громче", "up"):
-            new = cur + 10
-        elif low in ("-", "тише", "down"):
-            new = cur - 10
+        if low in ("+", "громче", "up") or low.startswith("+"):
+            m = re.search(r"\+(\d+)", low)
+            new = cur + (int(m.group(1)) if m else 10)
+        elif low in ("-", "тише", "down") or low.startswith("-"):
+            m = re.search(r"-(\d+)", low)
+            new = cur - (int(m.group(1)) if m else 10)
         else:
-            m = re.search(r"-?\d+", low)
+            m = re.search(r"\d+", low)
             new = int(m.group()) if m else cur
     else:
         new = int(level)
