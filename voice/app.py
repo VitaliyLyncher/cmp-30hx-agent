@@ -805,6 +805,26 @@ async def handle_command(s: Session, cmd: dict) -> None:
         await s.send({"type": "wake_mode_set", "enabled": want,
                       "mode": mode, "word": word})
 
+    elif t in ("music_state", "music_control", "music_like", "music_play"):
+        # панель «Музыка»: список, лайки и кнопки — без участия модели
+        if t == "music_state":
+            snap = await asyncio.get_running_loop().run_in_executor(
+                None, tools.music_snapshot)
+        elif t == "music_control":
+            snap = await asyncio.get_running_loop().run_in_executor(
+                None, tools.music_control,
+                str(cmd.get("action", "")), cmd.get("level"))
+        elif t == "music_like":
+            snap = await asyncio.get_running_loop().run_in_executor(
+                None, tools.music_like, str(cmd.get("id", "")))
+        else:
+            snap = await asyncio.get_running_loop().run_in_executor(
+                None, tools.music_play, str(cmd.get("id", "")))
+        await s.send(snap)
+        if snap.get("msg"):
+            await s.send({"type": "tool_result", "name": "music",
+                          "result": snap["msg"]})
+
     elif t == "reset":
         if s.busy:
             await s.send({"type": "error", "error": "сброс недоступен во время хода"})

@@ -22,6 +22,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 from datetime import datetime
 from pathlib import Path
 
@@ -709,7 +710,8 @@ def _scan_local(query: str) -> list[Path]:
     return sorted(p for p in files if any(w in hay(p) for w in words))
 
 
-def _start_playlist(items: list[str], titles: list[str], query: str) -> str | None:
+def _start_playlist(items: list[str], titles: list[str], query: str,
+                    source: str = "youtube") -> str | None:
     """Запускает mpv с плейлистом. Возвращает текст ошибки или None."""
     binp = _mpv_bin()
     if not os.path.exists(binp):
@@ -739,6 +741,9 @@ def _start_playlist(items: list[str], titles: list[str], query: str) -> str | No
                        query=query, sock=sock)
     if proc.poll() is not None:
         return "Плеер сразу завершился — возможно, нет доступа к звуку."
+    # в историю панели — каждый трек очереди
+    for title, item in zip(titles, items):
+        _record(title, source, item, query)
     return None
 
 
@@ -882,7 +887,7 @@ def play_music(query: str) -> str:
     except Exception as e:  # noqa: BLE001
         return f"Не нашёл трек «{q}»: {e}"
     titles = [f"{q} ({i + 1})" for i in range(len(urls))]
-    err = _start_playlist(urls, titles, q)
+    err = _start_playlist(urls, titles, q, source="youtube")
     if err:
         return err
     return f"Включаю «{q}» на этом компьютере."
@@ -901,11 +906,161 @@ def play_local(query: str = "") -> str:
     limit = config.music_playlist_size()
     files = files[:limit]
     titles = [p.stem for p in files]
-    err = _start_playlist([str(p) for p in files], titles, q or "локальная музыка")
+    err = _start_playlist([str(p) for p in files], titles, q or "локальная музыка",
+                          source="local")
     if err:
         return err
     what = f"«{titles[0]}»" if len(files) == 1 else f"{len(files)} трек(ов), начиная с «{titles[0]}»"
     return f"Включаю из папки «{folder.name}»: {what}."
+
+
+# --- история прослушивания и лайки (панель «Музыка») -------------------------
+_hist_lock = threading.Lock()
+_hist_loaded = False
+_history: list[dict] = []
+_favorites: set[str] = set()
+
+
+def _hist_file() -> Path:
+    return Path(config.music_state_file()).expanduser()
+
+
+def _load_hist() -> None:
+    global _hist_loaded, _history, _favorites
+    if _hist_loaded:
+        return
+    _hist_loaded = True
+    try:
+        data = json.loads(_hist_file().read_text(encoding="utf-8"))
+        _history = [h for h in data.get("history", []) if isinstance(h, dict)]
+        _favorites = {str(x) for x in data.get("favorites", [])}
+    except (OSError, ValueError):
+        pass
+
+
+def _save_hist() -> None:
+    p = _hist_file()
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        tmp = p.with_suffix(".tmp")
+        tmp.write_text(json.dumps({"history": _history[-60:],
+                                   "favorites": sorted(_favorites)},
+                                  ensure_ascii=False), encoding="utf-8")
+        tmp.replace(p)
+    except OSError as e:  # noqa: BLE001
+        log.warning("music state: %s", e)
+
+
+def _record(title: str, source: str, ref: str, query: str = "") -> dict:
+    _load_hist()
+    item = {"id": uuid.uuid4().hex[:10], "title": title, "source": source,
+            "ref": ref, "query": query, "ts": time.time()}
+    with _hist_lock:
+        _history.append(item)
+        del _history[:-60]
+        _save_hist()
+    return item
+
+
+def _fav_key(title: str) -> str:
+    return (title or "").strip().casefold()
+
+
+def _hist_item(ident: str) -> dict | None:
+    _load_hist()
+    ident = (ident or "").strip()
+    with _hist_lock:
+        for h in reversed(_history):
+            if h.get("id") == ident or _fav_key(h.get("title", "")) == _fav_key(ident):
+                return dict(h)
+    return None
+
+
+def music_like(ident: str) -> dict:
+    item = _hist_item(ident)
+    if item is None:
+        snap = music_snapshot()
+        snap["msg"] = "Не нашёл такой трек в истории."
+        return snap
+    key = _fav_key(item["title"])
+    with _hist_lock:
+        if key in _favorites:
+            _favorites.discard(key)
+            msg = f"Убрал из избранного «{item['title']}»."
+        else:
+            _favorites.add(key)
+            msg = f"Добавил в избранное «{item['title']}»."
+        _save_hist()
+    snap = music_snapshot()
+    snap["msg"] = msg
+    return snap
+
+
+def music_play(ident: str) -> dict:
+    item = _hist_item(ident)
+    if item is None:
+        snap = music_snapshot()
+        snap["msg"] = "Не нашёл такой трек в истории."
+        return snap
+    title = item.get("title") or ""
+    ref = str(item.get("ref") or "")
+    source = item.get("source") or "youtube"
+    if source == "local" and os.path.exists(ref):
+        err = _start_playlist([ref], [title], item.get("query") or title, source="local")
+    elif ref.startswith("http"):
+        err = _start_playlist([ref], [title], item.get("query") or title, source=source)
+    else:
+        play_music(item.get("query") or title)
+        err = None
+    snap = music_snapshot()
+    snap["msg"] = err or f"Включаю «{title}»."
+    return snap
+
+
+def music_control(action: str, level=None) -> dict:
+    a = (action or "").strip().lower()
+    handlers = {
+        "toggle": toggle_pause,
+        "pause": pause_music,
+        "resume": resume_music,
+        "stop": stop_music,
+        "next": next_track,
+        "prev": prev_track,
+        "status": music_status,
+    }
+    if a == "volume":
+        msg = set_volume(level if level is not None else "+10")
+    elif a in handlers:
+        msg = handlers[a]()
+    else:
+        msg = f"Неизвестное действие «{action}»."
+    snap = music_snapshot()
+    snap["msg"] = msg
+    return snap
+
+
+def music_snapshot() -> dict:
+    _load_hist()
+    alive = _playing()
+    title = _current_title() if alive else ""
+    paused = _ipc_get("pause") if alive else None
+    vol = _ipc_get("volume") if alive else _player.get("volume")
+    with _hist_lock:
+        items = list(reversed(_history[-40:]))
+        favs = set(_favorites)
+    return {
+        "type": "music_state",
+        "playing": alive,
+        "title": title,
+        "paused": bool(paused),
+        "volume": int(vol) if isinstance(vol, (int, float)) else None,
+        "history": [{
+            "id": h.get("id"), "title": h.get("title"),
+            "source": h.get("source"), "ts": h.get("ts"),
+            "liked": _fav_key(h.get("title", "")) in favs,
+            "current": alive and title == h.get("title"),
+        } for h in items],
+    }
 
 
 def open_site(target: str) -> str:

@@ -1,4 +1,4 @@
-﻿<!doctype html>
+<!doctype html>
 <html lang="ru">
 <head>
 <meta charset="utf-8">
@@ -118,6 +118,20 @@ input[type=checkbox]{accent-color:var(--acc);width:15px;height:15px}
     </div>
 
     <div class="card">
+      <h2>Музыка</h2>
+      <div class="stat" id="musicNow" style="margin-bottom:8px">—</div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px">
+        <button id="mPrev" title="предыдущий трек">⏮</button>
+        <button id="mToggle" title="пауза / продолжить">⏸</button>
+        <button id="mNext" title="следующий трек">⏭</button>
+        <button id="mStop" title="остановить">⏹</button>
+        <button id="mVolDown" title="тише">🔉</button>
+        <button id="mVolUp" title="громче">🔊</button>
+      </div>
+      <div id="musicList" style="max-height:240px;overflow:auto;font-size:13px"></div>
+    </div>
+
+    <div class="card">
       <h2>Текстовый ввод</h2>
       <textarea id="txt" placeholder="Наберите фразу и нажмите Enter. Shift+Enter — перенос строки."></textarea>
       <div class="row" style="margin-top:8px">
@@ -166,6 +180,9 @@ const el = {
   segTTS: $("segTTS"), selVoice: $("selVoice"), chkWake: $("chkWake"),
   btnReset: $("btnReset"), micHint: $("micHint"),
   partial: $("partial"), answer: $("answer"), actions: $("actions"), genmeta: $("genmeta"),
+  musicNow: $("musicNow"), musicList: $("musicList"),
+  mPrev: $("mPrev"), mToggle: $("mToggle"), mNext: $("mNext"), mStop: $("mStop"),
+  mVolDown: $("mVolDown"), mVolUp: $("mVolUp"),
   txt: $("txt"), btnSend: $("btnSend"), wordMode: $("wordMode"),
   wordBuf: $("wordBuf"), modeHint: $("modeHint"), chips: $("chips"),
   kvlog: $("kvlog"), kvTotal: $("kvTotal"), kvBase: $("kvBase"), kvCount: $("kvCount"),
@@ -311,6 +328,7 @@ function connect() {
     logEvent("WebSocket подключён", "okc");
     setState("готов", false);
     ws.send(JSON.stringify({ type: "stat" }));
+    ws.send(JSON.stringify({ type: "music_state" }));
     ws.send(JSON.stringify({ type: "tts_engine", engine: currentTTS }));
     if (currentVoice) ws.send(JSON.stringify({ type: "tts_voice", voice: currentVoice }));
     if (el.chkWake.checked && !el.chkWake.disabled) {
@@ -452,6 +470,9 @@ function handle(m) {
       break;
     case "audio_meta":
       sampleRate = m.sample_rate || 24000;
+      break;
+    case "music_state":
+      renderMusic(m);
       break;
     case "ready":
       busy = false;
@@ -764,6 +785,58 @@ el.chkWake.onchange = () => {
 };
 
 el.btnReset.onclick = () => send({ type: "reset" });
+
+// ---------------- панель «Музыка» ----------------
+function sendMusicState() {
+  if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "music_state" }));
+}
+
+function renderMusic(m) {
+  const playing = !!m.playing;
+  const title = m.title || "";
+  const vol = (typeof m.volume === "number") ? m.volume : null;
+  el.musicNow.textContent = playing
+    ? `${m.paused ? "⏸" : "▶"} ${title}${vol != null ? " · громкость " + vol + "%" : ""}`
+    : "ничего не играет";
+  el.mToggle.textContent = playing && m.paused ? "▶" : "⏸";
+  const list = Array.isArray(m.history) ? m.history : [];
+  el.musicList.innerHTML = list.length ? ""
+    : '<div style="color:#6f7787">Пока ничего не играло</div>';
+  for (const h of list) {
+    const row = document.createElement("div");
+    row.style.cssText = "display:flex;align-items:center;gap:6px;padding:4px 0;" +
+      "border-bottom:1px solid #23262d";
+    const like = document.createElement("button");
+    like.textContent = h.liked ? "♥" : "♡";
+    like.title = h.liked ? "убрать из избранного" : "в избранное";
+    like.style.cssText = "background:none;border:none;cursor:pointer;font-size:16px;" +
+      "color:" + (h.liked ? "#e5534b" : "#6f7787");
+    like.onclick = () => send({ type: "music_like", id: h.id });
+    const play = document.createElement("button");
+    play.textContent = "▶";
+    play.title = "включить";
+    play.style.cssText = "background:none;border:none;cursor:pointer;color:#3fb950";
+    play.onclick = () => send({ type: "music_play", id: h.id });
+    const label = document.createElement("span");
+    label.innerHTML = (h.current ? "● " : "") + escapeHtml(h.title || "—");
+    label.title = h.title || "";
+    label.style.cssText = "flex:1;overflow:hidden;text-overflow:ellipsis;" +
+      "white-space:nowrap" + (h.current ? ";color:#3fb950" : "");
+    const src = document.createElement("span");
+    src.textContent = h.source === "local" ? "файл" : "youtube";
+    src.style.cssText = "color:#6f7787;font-size:11px";
+    row.append(like, play, label, src);
+    el.musicList.appendChild(row);
+  }
+}
+
+el.mToggle.onclick = () => send({ type: "music_control", action: "toggle" });
+el.mStop.onclick = () => send({ type: "music_control", action: "stop" });
+el.mNext.onclick = () => send({ type: "music_control", action: "next" });
+el.mPrev.onclick = () => send({ type: "music_control", action: "prev" });
+el.mVolDown.onclick = () => send({ type: "music_control", action: "volume", level: "-10" });
+el.mVolUp.onclick = () => send({ type: "music_control", action: "volume", level: "+10" });
+setInterval(sendMusicState, 2500);
 
 function sendText() {
   const text = el.txt.value.trim();
