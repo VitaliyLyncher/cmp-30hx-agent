@@ -366,6 +366,8 @@ class Session:
                     continue
                 if self.turn_detector.should_finalize():
                     self.turn_detector.fired = True
+                    log.info("smart turn: закрываю фразу (hold=%.0f мс, text=%r)",
+                             self.turn_detector.hold_ms(), self.turn_detector.text[-60:])
                     self.asr.request_finish()
             except Exception as e:  # noqa: BLE001
                 log.warning("turn loop: %s", e)
