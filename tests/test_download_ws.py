@@ -40,6 +40,10 @@ async def main() -> int:
                 continue
             m = json.loads(raw)
             turns.append(m.get("type"))
+            if m.get("type") in ("tool_result", "error", "tts_error"):
+                print("event:", m)
+            if m.get("type") == "ans_token":
+                print("ans:", m.get("text", "")[:100])
             if m.get("type") == "tool_call":
                 check("модель/роутер вызвал download_track",
                       m.get("name") == "download_track", str(m))
