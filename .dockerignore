@@ -1,0 +1,20 @@
+# контекст сборки — только код; модели, venv и собранные бинарники монтируются
+.git
+.gitignore
+.gitattributes
+.venv
+.venv-silero
+.venv-*
+models
+tone_asr
+src
+daemon/bonsai_daemon
+**/__pycache__
+*.pyc
+*.log
+run
+logs
+REPORT.md
+TZ_single_cmp30hx.md
+AGENTS.md
+docker/README.md
