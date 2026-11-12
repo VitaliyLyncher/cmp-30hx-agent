@@ -37,6 +37,20 @@ async def recv_state(ws, timeout: float = 30) -> dict:
             return m
 
 
+async def wait_state(ws, pred, deadline_s: float = 90) -> dict:
+    """Периодически просим music_state, пока не выполнится условие."""
+    loop = asyncio.get_running_loop()
+    end = loop.time() + deadline_s
+    last = {}
+    while loop.time() < end:
+        await ws.send(json.dumps({"type": "music_state"}))
+        last = await recv_state(ws)
+        if pred(last):
+            return last
+        await asyncio.sleep(1.0)
+    return last
+
+
 async def main() -> int:
     async with websockets.connect(WS, max_size=8 * 1024 * 1024) as ws:
         await ws.send(json.dumps({"type": "music_state"}))
@@ -44,9 +58,9 @@ async def main() -> int:
         check("music_state приходит", isinstance(st.get("history"), list), str(st)[:200])
 
         await ws.send(json.dumps({"type": "text", "text": "включи музыку Rammstein Sonne"}))
-        await recv_state(ws)          # первый снимок может быть до старта
-        st = await recv_state(ws, timeout=90)
-        check("в истории есть трек", len(st["history"]) >= 1, str(st["history"])[:200])
+        st = await wait_state(ws, lambda s: s.get("playing") is True, 120)
+        check("в истории есть трек", len(st.get("history") or []) >= 1,
+              str(st.get("history"))[:200])
         check("играет", st.get("playing") is True, str(st)[:200])
 
         await ws.send(json.dumps({"type": "music_control", "action": "pause"}))
@@ -57,11 +71,13 @@ async def main() -> int:
         st = await recv_state(ws)
         check("стоп через панель", st.get("playing") is False, st.get("msg"))
 
-        item = st["history"][0]
-        await ws.send(json.dumps({"type": "music_like", "id": item["id"]}))
-        st = await recv_state(ws)
-        check("лайк через панель", st["history"][0].get("liked") is True,
-              str(st["history"][0]))
+        item = (st.get("history") or [{}])[0]
+        check("в истории есть id", bool(item.get("id")), str(item))
+        if item.get("id"):
+            await ws.send(json.dumps({"type": "music_like", "id": item["id"]}))
+            st = await recv_state(ws)
+            check("лайк через панель", st["history"][0].get("liked") is True,
+                  str(st["history"][0]))
 
     print("ИТОГ:", "OK" if FAILS == 0 else f"{FAILS} FAIL")
     return 0 if FAILS == 0 else 1
