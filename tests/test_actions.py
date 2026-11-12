@@ -1,9 +1,10 @@
-﻿"""Юнит-тесты действий (музыка/видео/сайты) без сети и модели.
+"""Юнит-тесты действий (музыка/видео/сайты) без сети и модели.
 
 Запуск: python3 tests/test_actions.py
 """
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
