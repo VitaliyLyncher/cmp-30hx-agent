@@ -242,3 +242,9 @@ def action_domains() -> list[str]:
             "youtube.com,music.youtube.com,spotify.com,music.yandex.ru,"
             "soundcloud.com,kinopoisk.ru,vk.com")
     return [d.strip().lower() for d in raw.split(",") if d.strip()]
+
+
+# открывать ссылку действия сразу в новой вкладке или только показывать кнопку
+# (по умолчанию НЕ открываем: иначе поиск музыки/видео сам поднимает вкладку,
+#  а YouTube может начать воспроизведение без явного клика)
+def action_auto_open() -> bool: return b("ACTION_AUTO_OPEN", False)

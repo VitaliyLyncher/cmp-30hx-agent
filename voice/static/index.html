@@ -417,8 +417,12 @@ function handle(m) {
       el.actions.innerHTML = "";
       el.actions.appendChild(a);
       logEvent(`действие: <a href="${m.url}" target="_blank" rel="noopener">${title}</a>`, "okc");
-      // автооткрытие может блокироваться как «не по клику» — тогда остаётся кнопка
-      try { window.open(m.url, "_blank", "noopener"); } catch (e) {}
+      // автооткрытие выключено по умолчанию (ACTION_AUTO_OPEN=1 включает):
+      // иначе поиск музыки/видео сам поднимает вкладку, а YouTube может
+      // начать играть без клика — звук «из ниоткуда»
+      if (m.auto_open) {
+        try { window.open(m.url, "_blank", "noopener"); } catch (e) {}
+      }
       break;
     }
     case "gen_stats":

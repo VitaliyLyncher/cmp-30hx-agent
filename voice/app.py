@@ -1,4 +1,4 @@
-"""Голосовой диалоговый сервис.
+﻿"""Голосовой диалоговый сервис.
 
 Конвейер (раздел 3 ТЗ):
   браузер -> PCM16 16 кГц по WebSocket -> стриминговый ASR (CPU, свой поток)
@@ -120,7 +120,8 @@ class Turn:
             if action is not None:
                 url = str(action.get("url", ""))
                 if tools.action_url_allowed(url):
-                    await self.session.send({"type": "action", **action})
+                    await self.session.send({"type": "action", **action,
+                                             "auto_open": config.action_auto_open()})
                 else:
                     log.warning("action: домен не разрешён: %s", url)
                 result = clean or result
@@ -246,7 +247,8 @@ class Turn:
                     # отдаём человекочитаемый текст без служебного маркера
                     url = str(action.get("url", ""))
                     if tools.action_url_allowed(url):
-                        await self.session.send({"type": "action", **action})
+                        await self.session.send({"type": "action", **action,
+                                             "auto_open": config.action_auto_open()})
                     else:
                         log.warning("action: домен не разрешён: %s", url)
                     result = clean
