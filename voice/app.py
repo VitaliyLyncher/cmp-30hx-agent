@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import time
 from pathlib import Path
 
@@ -266,6 +267,7 @@ class Session:
         )
         self._turn_task: asyncio.Task | None = None
         self._wake_mode = False
+        self._wake_heard = False
         self._closing = False
 
     # -- отправка ---------------------------------------------------------
@@ -328,35 +330,77 @@ class Session:
                 self.tts_task.cancel()
             self.tts_task = None
 
+    # -- wake word (режим asr) ---------------------------------------------
+    @staticmethod
+    def _match_wake(text: str) -> tuple[bool, str]:
+        """Есть ли в тексте ключевая фраза. Возвращает (нашли, остаток)."""
+        low = (text or "").lower()
+        for phrase in config.wakeword_phrases():
+            m = re.search(r"\b" + re.escape(phrase) + r"\b[\s,.!?—-]*", low)
+            if m:
+                return True, (text[:m.start()] + " " + text[m.end():]).strip()
+        return False, text or ""
+
     # -- ASR события -------------------------------------------------------
     async def on_asr_event(self, ev: dict) -> None:
         kind = ev.get("type")
         if kind == "wake":
-            # услышали ключевое слово: сообщаем клиенту (он сыграет «динь»)
+            # openWakeWord: услышали ключевое слово
+            self._wake_heard = True
             await self.send({"type": "wake", "word": config.wakeword_model()})
             self.turn_detector.on_speech_start()
-        elif kind == "speech_start":
+            return
+        if kind == "speech_start":
             self.turn_detector.on_speech_start()
             await self.send({"type": "speech_start"})
-        elif kind == "speech_end":
+            return
+        if kind == "speech_end":
             self.turn_detector.on_silence()
             await self.send({"type": "speech_end"})
-        elif kind == "partial":
+            return
+        if kind == "partial":
+            text = ev["text"]
+            if self._wake_mode and not self._wake_heard:
+                found, rest = self._match_wake(text)
+                if not found:
+                    return          # говорили без ключевого слова — игнорируем
+                self._wake_heard = True
+                await self.send({"type": "wake",
+                                 "word": config.wakeword_phrases()[0] if config.wakeword_phrases() else "wake"})
+                text = rest
+                if not text:
+                    return
+            elif self._wake_mode and self._wake_heard:
+                _, rest = self._match_wake(text)
+                text = rest or text
             self.source = "asr"
-            self.turn_detector.on_partial(ev["text"])
-            await self.send({"type": "partial", "text": ev["text"],
+            self.turn_detector.on_partial(text)
+            await self.send({"type": "partial", "text": text,
                              "utterance_ms": ev.get("utterance_ms")})
             if not self.busy:
                 _tools_check["busy"] = True   # идёт речь: базу не пересчитывать
-                self.prefill.submit(ev["text"], self.history,
+                self.prefill.submit(text, self.history,
                                     lambda r: self._on_prefill_stats(r, "asr"))
-        elif kind == "final":
+            return
+        if kind == "final":
+            text = ev["text"]
+            if self._wake_mode:
+                if self._wake_heard:
+                    _, text = self._match_wake(text)
+                    text = text.strip()
+                else:
+                    found, rest = self._match_wake(text)
+                    if not found:
+                        self.turn_detector.reset()
+                        return              # фраза без ключевого слова
+                    text = rest.strip()
+                self._wake_heard = False
             _tools_check["busy"] = False
             self.turn_detector.reset()
-            if self.busy:
+            if self.busy or not text:
                 return
-            await self.send({"type": "final", "text": ev["text"]})
-            self.spawn_turn(ev["text"], "asr")
+            await self.send({"type": "final", "text": text})
+            self.spawn_turn(text, "asr")
 
     # -- smart turn: раз в 100 мс проверяем, не пора ли закрыть фразу ------
     async def _turn_loop(self) -> None:
@@ -469,7 +513,7 @@ class Session:
             return
         self.asr = SessionASR()
         self.asr.start(lambda ev: asyncio.create_task(self.on_asr_event(ev)))
-        if self._wake_mode:
+        if self._wake_mode and config.wakeword_mode() == "oww":
             self.asr.set_wake_mode(True)
         self.start_turn_loop()
 
@@ -545,6 +589,8 @@ async def cfg():
         },
         "wakeword": {
             "enabled": config.wakeword_enabled(),
+            "mode": config.wakeword_mode(),
+            "phrases": config.wakeword_phrases(),
             "model": config.wakeword_model(),
             "threshold": config.wakeword_threshold(),
         },
@@ -695,12 +741,17 @@ async def handle_command(s: Session, cmd: dict) -> None:
             await s.send({"type": "wake_mode_set", "enabled": False,
                           "reason": "wake word выключен в конфиге (WAKEWORD_ENABLED=0)"})
             return
+        mode = config.wakeword_mode()
         s._wake_mode = want
+        s._wake_heard = False
         if s.asr is not None:
-            s.asr.set_wake_mode(want)
-        active = bool(s.asr is not None and getattr(s.asr, "_wake_mode", False))
-        await s.send({"type": "wake_mode_set", "enabled": active,
-                      "word": config.wakeword_model()})
+            # openWakeWord умеет слушать до распознавателя; режим asr работает
+            # поверх обычного ASR, там ничего отключать не нужно.
+            s.asr.set_wake_mode(want and mode == "oww")
+        word = (config.wakeword_model() if mode == "oww"
+                else ", ".join(config.wakeword_phrases()))
+        await s.send({"type": "wake_mode_set", "enabled": want,
+                      "mode": mode, "word": word})
 
     elif t == "reset":
         if s.busy:

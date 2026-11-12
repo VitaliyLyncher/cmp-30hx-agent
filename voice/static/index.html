@@ -261,8 +261,11 @@ async function loadConfig() {
     fillVoices();
     const wk = c.wakeword || {};
     el.chkWake.disabled = !wk.enabled;
+    const wname = wk.mode === "oww"
+      ? (wk.model || "hey jarvis")
+      : ((wk.phrases && wk.phrases[0]) || "джарвис");
     el.chkWake.title = wk.enabled
-      ? `ключевое слово «${wk.model}», порог ${wk.threshold}`
+      ? `ключевое слово «${wname}» (${wk.mode || "asr"})`
       : "wake word выключен в конфиге (WAKEWORD_ENABLED=0)";
     if (wk.enabled && localStorage.getItem("wake") === "1") el.chkWake.checked = true;
     el.modeHint.textContent = c.tools_enabled

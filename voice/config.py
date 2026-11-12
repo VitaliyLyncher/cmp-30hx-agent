@@ -1,4 +1,4 @@
-﻿"""Конфигурация: свой парсер .env без внешних зависимостей.
+"""Конфигурация: свой парсер .env без внешних зависимостей.
 
 Порядок поиска .env: явный путь из VOICE_ENV_FILE -> .env в корне проекта ->
 .env рядом с приложением. Уже заданные переменные НЕ перезаписываются
@@ -191,8 +191,19 @@ def turn_max_ms() -> float: return f("TURN_MAX_MS", 2500)
 def vad_rms() -> float: return f("VAD_RMS", 0.03)
 def vad_hangover_ms() -> float: return f("VAD_HANGOVER_MS", 350)
 
-# --- Wake word (openWakeWord) ------------------------------------------------
+# --- Wake word ---------------------------------------------------------------
+# asr — постоянно слушаем ASR и ждём фразу из WAKEWORD_PHRASES («джарвис»):
+#       работает для русского без обучения модели;
+# oww — openWakeWord (английские модели: hey_jarvis, alexa, …).
 def wakeword_enabled() -> bool: return b("WAKEWORD_ENABLED", False)
+def wakeword_mode() -> str: return s("WAKEWORD_MODE", "asr").strip().lower()
+
+
+def wakeword_phrases() -> list[str]:
+    raw = s("WAKEWORD_PHRASES", "джарвис,ассистент")
+    return [p.strip().lower() for p in raw.split(",") if p.strip()]
+
+
 def wakeword_model() -> str: return s("WAKEWORD_MODEL", "hey_jarvis")
 def wakeword_threshold() -> float: return f("WAKEWORD_THRESHOLD", 0.5)
 def wakeword_model_path() -> str: return s("WAKEWORD_MODEL_PATH", "")
