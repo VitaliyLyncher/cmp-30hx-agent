@@ -1,4 +1,4 @@
-<!doctype html>
+﻿<!doctype html>
 <html lang="ru">
 <head>
 <meta charset="utf-8">
@@ -113,6 +113,7 @@ input[type=checkbox]{accent-color:var(--acc);width:15px;height:15px}
     <div class="card">
       <h2>Ответ</h2>
       <div class="stream" id="answer"></div>
+      <div id="actions" style="margin-top:6px"></div>
       <div class="stat" id="genmeta" style="margin-top:8px"></div>
     </div>
 
@@ -164,7 +165,7 @@ const el = {
   btnTalk: $("btnTalk"), dot: $("dot"), state: $("state"),
   segTTS: $("segTTS"), selVoice: $("selVoice"), chkWake: $("chkWake"),
   btnReset: $("btnReset"), micHint: $("micHint"),
-  partial: $("partial"), answer: $("answer"), genmeta: $("genmeta"),
+  partial: $("partial"), answer: $("answer"), actions: $("actions"), genmeta: $("genmeta"),
   txt: $("txt"), btnSend: $("btnSend"), wordMode: $("wordMode"),
   wordBuf: $("wordBuf"), modeHint: $("modeHint"), chips: $("chips"),
   kvlog: $("kvlog"), kvTotal: $("kvTotal"), kvBase: $("kvBase"), kvCount: $("kvCount"),
@@ -367,7 +368,7 @@ function handle(m) {
     case "turn_start":
       busy = true;
       answerText = "";
-      el.answer.textContent = "";
+      el.answer.textContent = ""; el.actions.innerHTML = "";
       el.genmeta.textContent = "";
       setState("думаю…", true);
       el.kvLive.classList.remove("on", "stale");
@@ -386,6 +387,22 @@ function handle(m) {
       answerText += m.text;
       el.answer.textContent = answerText;
       break;
+    case "action": {
+      const title = m.title || "Открыть";
+      const a = document.createElement("a");
+      a.href = m.url || "#";
+      a.target = "_blank";
+      a.rel = "noopener";
+      a.textContent = "▶ " + title;
+      a.style.cssText = "display:inline-block;margin:0 8px 6px 0;padding:5px 10px;" +
+        "border:1px solid #3fb950;border-radius:8px;color:#3fb950;text-decoration:none;font-size:13px";
+      el.actions.innerHTML = "";
+      el.actions.appendChild(a);
+      logEvent(`действие: <a href="${m.url}" target="_blank" rel="noopener">${title}</a>`, "okc");
+      // автооткрытие может блокироваться как «не по клику» — тогда остаётся кнопка
+      try { window.open(m.url, "_blank", "noopener"); } catch (e) {}
+      break;
+    }
     case "gen_stats":
       el.genmeta.textContent =
         `токенов ${m.tokens} · ${m.tok_s} ток/с · первый токен ${m.first_token_ms} мс · ` +
@@ -458,7 +475,7 @@ function handle(m) {
       el.kvNewSum.textContent = "0";
       paintBar(0);
       setPrefillIdle("ждёт речи");
-      el.answer.textContent = "";
+      el.answer.textContent = ""; el.actions.innerHTML = "";
       el.partial.textContent = "—";
       logEvent("история сброшена, база осталась в KV", "okc");
       break;

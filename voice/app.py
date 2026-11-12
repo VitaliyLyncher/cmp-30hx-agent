@@ -1,4 +1,4 @@
-﻿"""Голосовой диалоговый сервис.
+"""Голосовой диалоговый сервис.
 
 Конвейер (раздел 3 ТЗ):
   браузер -> PCM16 16 кГц по WebSocket -> стриминговый ASR (CPU, свой поток)
@@ -210,6 +210,16 @@ class Turn:
                 await self.session.send({"type": "tool_call", "name": name, "args": args})
                 result = await asyncio.get_running_loop().run_in_executor(
                     None, tools.execute, name, args)
+                action, clean = tools.split_action(result)
+                if action is not None:
+                    # действие открываем в браузере клиента, а модели и истории
+                    # отдаём человекочитаемый текст без служебного маркера
+                    url = str(action.get("url", ""))
+                    if tools.action_url_allowed(url):
+                        await self.session.send({"type": "action", **action})
+                    else:
+                        log.warning("action: домен не разрешён: %s", url)
+                    result = clean
                 await self.session.send({"type": "tool_result", "name": name,
                                          "result": result[:600]})
                 self.tool_events.append({"name": name, "args": args, "result": result})

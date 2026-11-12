@@ -221,3 +221,13 @@ def tavily_key() -> str: return s("TAVILY_API_KEY", "").strip()
 def brave_key() -> str: return s("BRAVE_API_KEY", "").strip()
 def searxng_url() -> str: return s("SEARXNG_URL", "").strip()
 def search_timeout() -> float: return f("SEARCH_TIMEOUT", 20.0)
+
+# --- Действия (музыка/видео/сайты) -------------------------------------------
+# Какой музыкальный сервис открывать: youtube_music | spotify | yandex | soundcloud
+def music_service() -> str: return s("MUSIC_SERVICE", "youtube_music").strip().lower()
+# Домены, которые разрешено открывать действием (через запятую)
+def action_domains() -> list[str]:
+    raw = s("ACTION_DOMAINS",
+            "youtube.com,music.youtube.com,spotify.com,music.yandex.ru,"
+            "soundcloud.com,kinopoisk.ru,vk.com")
+    return [d.strip().lower() for d in raw.split(",") if d.strip()]

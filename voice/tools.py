@@ -450,8 +450,91 @@ def check_timer(label: str = "") -> str:
 
 
 # ---------------------------------------------------------------------------
-# Описания в OpenAI-подобном формате (для демона)
+# Действия: открыть музыку/видео/сайт в браузере пользователя
 # ---------------------------------------------------------------------------
+# Результат инструмента с действием: первая строка — маркер с JSON, дальше
+# человекочитаемый текст (он же уходит модели и в историю).
+ACTION_PREFIX = "__ACTION__"
+
+_MUSIC_URLS = {
+    "youtube_music": "https://music.youtube.com/search?q={q}",
+    "spotify": "https://open.spotify.com/search/{q}",
+    "yandex": "https://music.yandex.ru/search?text={q}",
+    "soundcloud": "https://soundcloud.com/search?q={q}",
+}
+
+
+def _action(payload: dict, human: str) -> str:
+    return ACTION_PREFIX + json.dumps(payload, ensure_ascii=False) + "\n" + human
+
+
+def split_action(result: str) -> tuple[dict | None, str]:
+    """Отделяет действие от текста результата."""
+    if not result or not result.startswith(ACTION_PREFIX):
+        return None, result
+    try:
+        line, _, rest = result.partition("\n")
+        payload = json.loads(line[len(ACTION_PREFIX):])
+        return (payload if isinstance(payload, dict) else None), rest.strip()
+    except (json.JSONDecodeError, ValueError):
+        return None, result
+
+
+def _allowed_url(url: str) -> bool:
+    try:
+        host = (urllib.parse.urlparse(url).hostname or "").lower()
+    except ValueError:
+        return False
+    if not host:
+        return False
+    return any(host == d or host.endswith("." + d) or d.endswith("." + host)
+               for d in config.action_domains())
+
+
+def music_search(query: str, service: str = "") -> str:
+    q = urllib.parse.quote_plus((query or "").strip())
+    if not q:
+        return "Не понял, какую музыку включить. Повторите название."
+    svc = (service or config.music_service()).strip().lower()
+    tpl = _MUSIC_URLS.get(svc) or _MUSIC_URLS["youtube_music"]
+    url = tpl.format(q=q)
+    human = f"Открываю музыку «{query}» в {svc.replace('_', ' ')}."
+    return _action({"kind": "open_url", "url": url,
+                    "title": f"Музыка: {query}", "service": svc}, human)
+
+
+def video_search(query: str) -> str:
+    q = urllib.parse.quote_plus((query or "").strip())
+    if not q:
+        return "Не понял, какое видео найти. Повторите запрос."
+    url = "https://www.youtube.com/results?search_query=" + q
+    return _action({"kind": "open_url", "url": url,
+                    "title": f"Видео: {query}", "service": "youtube"},
+                   f"Открываю видео «{query}» на YouTube.")
+
+
+def action_url_allowed(url: str) -> bool:
+    """Проверка домена для действий, инициированных моделью."""
+    return _allowed_url(url)
+
+
+def open_site(target: str) -> str:
+    t = (target or "").strip()
+    if not t:
+        return "Не понял, какой сайт открыть."
+    if not re.match(r"^https?://", t, re.I):
+        if _allowed_url("https://" + t):
+            t = "https://" + t
+        else:
+            # не URL — считаем поисковым запросом
+            q = urllib.parse.quote_plus(t)
+            t = "https://www.youtube.com/results?search_query=" + q
+    if not _allowed_url(t):
+        return ("Не могу открыть этот адрес: домен не в списке разрешённых "
+                "(ACTION_DOMAINS).")
+    return _action({"kind": "open_url", "url": t, "title": "Открыть сайт"},
+                   f"Открываю {t}.")
+
 TOOL_SPECS: list[dict] = [
     {"type": "function", "function": {
         "name": "web_search",
@@ -491,6 +574,29 @@ TOOL_SPECS: list[dict] = [
         "parameters": {"type": "object", "properties": {
             "label": {"type": "string", "description": "название таймера"},
         }}}},
+    {"type": "function", "function": {
+        "name": "music_search",
+        "description": "Включить музыку: открыть музыкальный сервис с поиском по "
+                       "исполнителю, песне или жанру. ОБЯЗАТЕЛЬНО вызывай на просьбы "
+                       "«включи/поставь музыку/песню/альбом/исполнителя», «хочу послушать …».",
+        "parameters": {"type": "object", "properties": {
+            "query": {"type": "string", "description": "что включить: исполнитель, песня, жанр"},
+            "service": {"type": "string", "description":
+                        "youtube_music | spotify | yandex | soundcloud (по умолчанию из конфига)"},
+        }, "required": ["query"]}}},
+    {"type": "function", "function": {
+        "name": "video_search",
+        "description": "Найти и открыть видео на YouTube. Вызывай на «найди/включи видео, "
+                       "ролик, клип, фильм, посмотри …».",
+        "parameters": {"type": "object", "properties": {
+            "query": {"type": "string", "description": "что искать"},
+        }, "required": ["query"]}}},
+    {"type": "function", "function": {
+        "name": "open_site",
+        "description": "Открыть сайт в браузере (только из разрешённых доменов).",
+        "parameters": {"type": "object", "properties": {
+            "target": {"type": "string", "description": "адрес вида https://… или домен"},
+        }, "required": ["target"]}}},
 ]
 
 _REGISTRY = {
@@ -500,6 +606,9 @@ _REGISTRY = {
     "calculator": lambda a: calculator(str(a.get("expression", ""))),
     "set_timer": lambda a: set_timer(a.get("seconds", 0), a.get("label", "")),
     "check_timer": lambda a: check_timer(a.get("label", "")),
+    "music_search": lambda a: music_search(str(a.get("query", "")), str(a.get("service", ""))),
+    "video_search": lambda a: video_search(str(a.get("query", ""))),
+    "open_site": lambda a: open_site(str(a.get("target", ""))),
 }
 
 
