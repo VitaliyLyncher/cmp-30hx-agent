@@ -363,6 +363,7 @@ class Session:
             if self._wake_mode and not self._wake_heard:
                 found, rest = self._match_wake(text)
                 if not found:
+                    log.info("wake: игнорирую (нет слова): %r", text[-80:])
                     return          # говорили без ключевого слова — игнорируем
                 self._wake_heard = True
                 await self.send({"type": "wake",
@@ -391,6 +392,7 @@ class Session:
                 else:
                     found, rest = self._match_wake(text)
                     if not found:
+                        log.info("wake: финал без слова: %r", (text or "")[-80:])
                         self.turn_detector.reset()
                         return              # фраза без ключевого слова
                     text = rest.strip()
