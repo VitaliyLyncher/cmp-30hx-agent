@@ -1,8 +1,8 @@
-# syntax=docker/dockerfile:1
+﻿# syntax=docker/dockerfile:1
 # Образ cmp-voice: CUDA runtime + Python + сервис. Модели, собранный демон и
 # libs llama.cpp монтируются снаружи (см. docker-compose.yml) — образ не
 # содержит 5 ГБ весов и пересобирается за минуты, а не за час.
-FROM nvidia/cuda:12.4.1-runtime-ubuntu24.04
+FROM nvidia/cuda:12.9.2-runtime-ubuntu24.04
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \

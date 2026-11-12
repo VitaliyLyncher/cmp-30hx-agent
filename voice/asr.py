@@ -275,14 +275,14 @@ class SessionASR:
                             self._speech_active = True
                             if self._t_speech_start is None:
                                 self._t_speech_start = now
-                            log.info("VAD: речь (rms=%.3f)", rms)
+                            log.debug("VAD: речь (rms=%.3f)", rms)
                             self._emit({"type": "speech_start"})
                     else:
                         if (self._speech_active
                                 and (now - self._last_speech) * 1000 >= config.vad_hangover_ms()):
                             self._speech_active = False
                             self._silence_since = now
-                            log.info("VAD: тишина (%.0f мс после речи)",
+                            log.debug("VAD: тишина (%.0f мс после речи)",
                                      (now - self._last_speech) * 1000)
                             self._emit({"type": "speech_end"})
 

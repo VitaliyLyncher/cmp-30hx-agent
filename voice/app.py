@@ -1,4 +1,4 @@
-"""Голосовой диалоговый сервис.
+﻿"""Голосовой диалоговый сервис.
 
 Конвейер (раздел 3 ТЗ):
   браузер -> PCM16 16 кГц по WebSocket -> стриминговый ASR (CPU, свой поток)
@@ -373,7 +373,7 @@ class Session:
             if self._wake_mode and not self._wake_heard:
                 found, rest = self._match_wake(text)
                 if not found:
-                    log.info("wake: игнорирую (нет слова): %r", text[-80:])
+                    log.debug("wake: игнорирую (нет слова): %r", text[-80:])
                     return          # говорили без ключевого слова — игнорируем
                 self._wake_heard = True
                 await self.send({"type": "wake",
@@ -402,7 +402,7 @@ class Session:
                 else:
                     found, rest = self._match_wake(text)
                     if not found:
-                        log.info("wake: финал без слова: %r", (text or "")[-80:])
+                        log.debug("wake: финал без слова: %r", (text or "")[-80:])
                         self.turn_detector.reset()
                         return              # фраза без ключевого слова
                     text = rest.strip()
@@ -425,7 +425,7 @@ class Session:
                     self.turn_detector.fired = True
                     d = self.turn_detector
                     now = time.monotonic()
-                    log.info("smart turn: закрываю (hold=%.0f, silence=%.0f, "
+                    log.debug("smart turn: закрываю (hold=%.0f, silence=%.0f, "
                              "since_change=%.0f, speech_age=%.0f, text=%r)",
                              d.hold_ms(),
                              (now - d.silence_since) * 1000 if d.silence_since else -1,
