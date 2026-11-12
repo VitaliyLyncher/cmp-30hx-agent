@@ -9,6 +9,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+# тесты не зависят от локального .env: инструменты должны быть включены
+os.environ.setdefault("VOICE_TOOLS_ENABLED", "1")
+
 from voice import tools  # noqa: E402
 
 FAILS = 0
