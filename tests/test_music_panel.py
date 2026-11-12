@@ -78,6 +78,30 @@ async def main() -> int:
             st = await recv_state(ws)
             check("лайк через панель", st["history"][0].get("liked") is True,
                   str(st["history"][0]))
+            check("попал в избранное", len(st.get("favorites") or []) == 1,
+                  str(st.get("favorites")))
+
+            # удалить из истории — избранное остаётся
+            await ws.send(json.dumps({"type": "music_delete", "id": item["id"],
+                                      "scope": "history"}))
+            st = await recv_state(ws)
+            check("удаление из истории", item["id"] not in [h.get("id") for h in st["history"]],
+                  str(st["history"])[:150])
+            check("избранное осталось", len(st.get("favorites") or []) == 1,
+                  str(st.get("favorites")))
+
+            # удалить из избранного
+            fid = st["favorites"][0]["id"]
+            await ws.send(json.dumps({"type": "music_delete", "id": fid,
+                                      "scope": "favorites"}))
+            st = await recv_state(ws)
+            check("удаление из избранного", len(st.get("favorites") or []) == 0,
+                  str(st.get("favorites")))
+
+        await ws.send(json.dumps({"type": "music_favorites"}))
+        st = await recv_state(ws)
+        check("играть избранное без избранного не падает",
+              "пусто" in (st.get("msg") or "").lower(), st.get("msg"))
 
     print("ИТОГ:", "OK" if FAILS == 0 else f"{FAILS} FAIL")
     return 0 if FAILS == 0 else 1

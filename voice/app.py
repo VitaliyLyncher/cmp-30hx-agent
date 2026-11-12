@@ -1,4 +1,4 @@
-﻿"""Голосовой диалоговый сервис.
+"""Голосовой диалоговый сервис.
 
 Конвейер (раздел 3 ТЗ):
   браузер -> PCM16 16 кГц по WebSocket -> стриминговый ASR (CPU, свой поток)
@@ -807,8 +807,9 @@ async def handle_command(s: Session, cmd: dict) -> None:
         await s.send({"type": "wake_mode_set", "enabled": want,
                       "mode": mode, "word": word})
 
-    elif t in ("music_state", "music_control", "music_like", "music_play"):
-        # панель «Музыка»: список, лайки и кнопки — без участия модели
+    elif t in ("music_state", "music_control", "music_like", "music_play",
+               "music_delete", "music_favorites"):
+        # панель «Музыка»: список, лайки, удаление и кнопки — без участия модели
         if t == "music_state":
             snap = await asyncio.get_running_loop().run_in_executor(
                 None, tools.music_snapshot)
@@ -819,6 +820,13 @@ async def handle_command(s: Session, cmd: dict) -> None:
         elif t == "music_like":
             snap = await asyncio.get_running_loop().run_in_executor(
                 None, tools.music_like, str(cmd.get("id", "")))
+        elif t == "music_delete":
+            snap = await asyncio.get_running_loop().run_in_executor(
+                None, tools.music_forget,
+                str(cmd.get("id", "")), str(cmd.get("scope", "history")))
+        elif t == "music_favorites":
+            snap = await asyncio.get_running_loop().run_in_executor(
+                None, tools.music_play_favorites)
         else:
             snap = await asyncio.get_running_loop().run_in_executor(
                 None, tools.music_play, str(cmd.get("id", "")))

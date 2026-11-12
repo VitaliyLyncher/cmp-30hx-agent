@@ -578,6 +578,10 @@ def route_action(text: str) -> tuple[str, dict] | None:
     if re.search(r"\b(тише|убавь|уменьши громкость|сбавь)\b", t, re.I):
         return "set_volume", {"level": "-10"}
 
+    if re.search(r"\b(избранн\w*|любим\w*|любимые)\b", t, re.I) and \
+            re.search(r"\b(включи|поставь|сыграй|запусти|играй)\b", t, re.I):
+        return "play_favorites", {}
+
     if _LOCAL_RE.search(t) and (_MUSIC_WORDS.search(t) or "коллекц" in t.lower()):
         q = _MUSIC_WORDS.sub(" ", t)
         q = _LOCAL_RE.sub(" ", q)
@@ -919,7 +923,9 @@ def play_local(query: str = "") -> str:
 _hist_lock = threading.Lock()
 _hist_loaded = False
 _history: list[dict] = []
-_favorites: set[str] = set()
+# избранное — отдельные записи, чтобы трек можно было убрать из истории,
+# но оставить в избранном (и наоборот)
+_favorites: list[dict] = []
 
 
 def _hist_file() -> Path:
@@ -934,7 +940,21 @@ def _load_hist() -> None:
     try:
         data = json.loads(_hist_file().read_text(encoding="utf-8"))
         _history = [h for h in data.get("history", []) if isinstance(h, dict)]
-        _favorites = {str(x) for x in data.get("favorites", [])}
+        favs: list[dict] = []
+        for x in data.get("favorites", []):
+            if isinstance(x, dict) and x.get("title"):
+                favs.append({
+                    "id": x.get("id") or uuid.uuid4().hex[:10],
+                    "title": x["title"], "source": x.get("source") or "youtube",
+                    "ref": x.get("ref") or "", "query": x.get("query") or "",
+                    "ts": x.get("ts") or 0,
+                })
+            elif isinstance(x, str) and x.strip():
+                # старый формат: список строк с названиями
+                favs.append({"id": uuid.uuid4().hex[:10], "title": x.strip(),
+                             "source": "youtube", "ref": "", "query": x.strip(),
+                             "ts": 0})
+        _favorites = favs
     except (OSError, ValueError):
         pass
 
@@ -945,7 +965,7 @@ def _save_hist() -> None:
         p.parent.mkdir(parents=True, exist_ok=True)
         tmp = p.with_suffix(".tmp")
         tmp.write_text(json.dumps({"history": _history[-60:],
-                                   "favorites": sorted(_favorites)},
+                                   "favorites": _favorites},
                                   ensure_ascii=False), encoding="utf-8")
         tmp.replace(p)
     except OSError as e:  # noqa: BLE001
@@ -987,6 +1007,16 @@ def _fav_key(title: str) -> str:
     return (title or "").strip().casefold()
 
 
+def _fav_record(ident: str) -> dict | None:
+    _load_hist()
+    ident = (ident or "").strip()
+    with _hist_lock:
+        for h in reversed(_favorites):
+            if h.get("id") == ident or _fav_key(h.get("title", "")) == _fav_key(ident):
+                return dict(h)
+    return None
+
+
 def _hist_item(ident: str) -> dict | None:
     _load_hist()
     ident = (ident or "").strip()
@@ -998,18 +1028,24 @@ def _hist_item(ident: str) -> dict | None:
 
 
 def music_like(ident: str) -> dict:
-    item = _hist_item(ident)
+    item = _hist_item(ident) or _fav_record(ident)
     if item is None:
         snap = music_snapshot()
-        snap["msg"] = "Не нашёл такой трек в истории."
+        snap["msg"] = "Не нашёл такой трек."
         return snap
     key = _fav_key(item["title"])
     with _hist_lock:
-        if key in _favorites:
-            _favorites.discard(key)
+        existing = next((f for f in _favorites if _fav_key(f.get("title", "")) == key), None)
+        if existing is not None:
+            _favorites.remove(existing)
             msg = f"Убрал из избранного «{item['title']}»."
         else:
-            _favorites.add(key)
+            _favorites.append({
+                "id": item.get("id") or uuid.uuid4().hex[:10],
+                "title": item["title"], "source": item.get("source") or "youtube",
+                "ref": item.get("ref") or "", "query": item.get("query") or "",
+                "ts": time.time(),
+            })
             msg = f"Добавил в избранное «{item['title']}»."
         _save_hist()
     snap = music_snapshot()
@@ -1017,11 +1053,71 @@ def music_like(ident: str) -> dict:
     return snap
 
 
+def music_forget(ident: str, scope: str = "history") -> dict:
+    """Удалить запись из истории и/или из избранного."""
+    ident = (ident or "").strip()
+    scope = (scope or "history").strip().lower()
+    if not ident:
+        snap = music_snapshot()
+        snap["msg"] = "Не указан трек для удаления."
+        return snap
+    removed = 0
+    with _hist_lock:
+        if scope in ("history", "all", "both"):
+            before = len(_history)
+            _history[:] = [h for h in _history if not (
+                h.get("id") == ident or _fav_key(h.get("title", "")) == _fav_key(ident))]
+            removed += before - len(_history)
+        if scope in ("favorites", "all", "both"):
+            before = len(_favorites)
+            _favorites[:] = [f for f in _favorites if not (
+                f.get("id") == ident or _fav_key(f.get("title", "")) == _fav_key(ident))]
+            removed += before - len(_favorites)
+        if removed:
+            _save_hist()
+    snap = music_snapshot()
+    snap["msg"] = ("Удалил." if removed else "Такой записи уже нет.")
+    return snap
+
+
+def music_play_favorites() -> dict:
+    _load_hist()
+    with _hist_lock:
+        favs = [dict(f) for f in reversed(_favorites)]
+    if not favs:
+        snap = music_snapshot()
+        snap["msg"] = "В избранном пока пусто — поставьте ♥ на треке в истории."
+        return snap
+    items: list[str] = []
+    titles: list[str] = []
+    source = "favorites"
+    for f in favs[:config.music_playlist_size()]:
+        ref = str(f.get("ref") or "")
+        title = str(f.get("title") or "")
+        if f.get("source") == "local" and os.path.exists(ref):
+            items.append(ref)
+            source = "local"
+        elif ref.startswith("http"):
+            items.append(ref)
+        elif f.get("query"):
+            items.append("ytsearch1:" + str(f["query"]))
+            source = "youtube"
+        titles.append(title)
+    if not items:
+        snap = music_snapshot()
+        snap["msg"] = "В избранном нет ссылок для воспроизведения."
+        return snap
+    err = _start_playlist(items, titles, "избранное", source=source)
+    snap = music_snapshot()
+    snap["msg"] = err or f"Включаю избранное ({len(items)})."
+    return snap
+
+
 def music_play(ident: str) -> dict:
-    item = _hist_item(ident)
+    item = _hist_item(ident) or _fav_record(ident)
     if item is None:
         snap = music_snapshot()
-        snap["msg"] = "Не нашёл такой трек в истории."
+        snap["msg"] = "Не нашёл такой трек."
         return snap
     title = item.get("title") or ""
     ref = str(item.get("ref") or "")
@@ -1051,6 +1147,10 @@ def music_control(action: str, level=None) -> dict:
     }
     if a == "volume":
         msg = set_volume(level if level is not None else "+10")
+    elif a in ("favorites", "play_favorites"):
+        snap = music_play_favorites()
+        snap["msg"] = snap.get("msg") or "Включаю избранное."
+        return snap
     elif a in handlers:
         msg = handlers[a]()
     else:
@@ -1068,7 +1168,8 @@ def music_snapshot() -> dict:
     vol = _ipc_get("volume") if alive else _player.get("volume")
     with _hist_lock:
         items = list(reversed(_history[-40:]))
-        favs = set(_favorites)
+        favs = list(reversed(_favorites))
+    fav_keys = {_fav_key(f.get("title", "")) for f in favs}
     return {
         "type": "music_state",
         "playing": alive,
@@ -1078,9 +1179,15 @@ def music_snapshot() -> dict:
         "history": [{
             "id": h.get("id"), "title": h.get("title"),
             "source": h.get("source"), "ts": h.get("ts"),
-            "liked": _fav_key(h.get("title", "")) in favs,
+            "liked": _fav_key(h.get("title", "")) in fav_keys,
             "current": alive and title == h.get("title"),
         } for h in items],
+        "favorites": [{
+            "id": f.get("id"), "title": f.get("title"),
+            "source": f.get("source"), "ts": f.get("ts"),
+            "liked": True,
+            "current": alive and title == f.get("title"),
+        } for f in favs],
     }
 
 
@@ -1186,6 +1293,10 @@ TOOL_SPECS: list[dict] = [
         "description": "Что сейчас играет: трек, позиция, пауза, громкость.",
         "parameters": {"type": "object", "properties": {}}}},
     {"type": "function", "function": {
+        "name": "play_favorites",
+        "description": "Включить треки из избранного (те, что отмечены ♥ в панели).",
+        "parameters": {"type": "object", "properties": {}}}},
+    {"type": "function", "function": {
         "name": "music_search",
         "description": "Открыть музыкальный сервис в браузере (без воспроизведения здесь). "
                        "Используй только если просят именно открыть сайт/сервис.",
@@ -1228,6 +1339,7 @@ _REGISTRY = {
     "prev_track": lambda a: prev_track(),
     "set_volume": lambda a: set_volume(str(a.get("level", "+10"))),
     "music_status": lambda a: music_status(),
+    "play_favorites": lambda a: music_play_favorites().get("msg") or "Включаю избранное.",
 }
 
 

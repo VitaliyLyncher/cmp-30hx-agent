@@ -128,6 +128,13 @@ input[type=checkbox]{accent-color:var(--acc);width:15px;height:15px}
         <button id="mVolDown" title="тише">🔉</button>
         <button id="mVolUp" title="громче">🔊</button>
       </div>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin:0 0 4px">
+        <span style="color:#6f7787;font-size:12px">Избранное</span>
+        <button id="mFavPlay" title="включить все избранные треки"
+                style="font-size:12px;padding:2px 8px">▶ играть избранное</button>
+      </div>
+      <div id="musicFavs" style="max-height:160px;overflow:auto;font-size:13px;margin-bottom:10px"></div>
+      <div style="color:#6f7787;font-size:12px;margin-bottom:4px">История</div>
       <div id="musicList" style="max-height:240px;overflow:auto;font-size:13px"></div>
     </div>
 
@@ -180,7 +187,8 @@ const el = {
   segTTS: $("segTTS"), selVoice: $("selVoice"), chkWake: $("chkWake"),
   btnReset: $("btnReset"), micHint: $("micHint"),
   partial: $("partial"), answer: $("answer"), actions: $("actions"), genmeta: $("genmeta"),
-  musicNow: $("musicNow"), musicList: $("musicList"),
+  musicNow: $("musicNow"), musicList: $("musicList"), musicFavs: $("musicFavs"),
+  mFavPlay: $("mFavPlay"),
   mPrev: $("mPrev"), mToggle: $("mToggle"), mNext: $("mNext"), mStop: $("mStop"),
   mVolDown: $("mVolDown"), mVolUp: $("mVolUp"),
   txt: $("txt"), btnSend: $("btnSend"), wordMode: $("wordMode"),
@@ -795,6 +803,39 @@ function sendMusicState() {
   if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "music_state" }));
 }
 
+function musicRow(h, scope) {
+  const row = document.createElement("div");
+  row.style.cssText = "display:flex;align-items:center;gap:6px;padding:4px 0;" +
+    "border-bottom:1px solid #23262d";
+  const like = document.createElement("button");
+  like.textContent = h.liked ? "♥" : "♡";
+  like.title = h.liked ? "убрать из избранного" : "в избранное";
+  like.style.cssText = "background:none;border:none;cursor:pointer;font-size:16px;" +
+    "color:" + (h.liked ? "#e5534b" : "#6f7787");
+  like.onclick = () => send({ type: "music_like", id: h.id });
+  const play = document.createElement("button");
+  play.textContent = "▶";
+  play.title = "включить";
+  play.style.cssText = "background:none;border:none;cursor:pointer;color:#3fb950";
+  play.onclick = () => send({ type: "music_play", id: h.id });
+  const label = document.createElement("span");
+  label.innerHTML = (h.current ? "● " : "") + escapeHtml(h.title || "—");
+  label.title = h.title || "";
+  label.style.cssText = "flex:1;overflow:hidden;text-overflow:ellipsis;" +
+    "white-space:nowrap" + (h.current ? ";color:#3fb950" : "");
+  const src = document.createElement("span");
+  src.textContent = h.source === "local" ? "файл" : "youtube";
+  src.style.cssText = "color:#6f7787;font-size:11px";
+  const del = document.createElement("button");
+  del.textContent = "✕";
+  del.title = scope === "favorites" ? "убрать из избранного" : "удалить из истории";
+  del.style.cssText = "background:none;border:none;cursor:pointer;color:#6f7787;" +
+    "font-size:14px";
+  del.onclick = () => send({ type: "music_delete", id: h.id, scope: scope });
+  row.append(like, play, label, src, del);
+  return row;
+}
+
 function renderMusic(m) {
   const playing = !!m.playing;
   const title = m.title || "";
@@ -803,36 +844,18 @@ function renderMusic(m) {
     ? `${m.paused ? "⏸" : "▶"} ${title}${vol != null ? " · громкость " + vol + "%" : ""}`
     : "ничего не играет";
   el.mToggle.textContent = playing && m.paused ? "▶" : "⏸";
+  const favs = Array.isArray(m.favorites) ? m.favorites : [];
   const list = Array.isArray(m.history) ? m.history : [];
+  el.mFavPlay.disabled = favs.length === 0;
+  el.musicFavs.innerHTML = favs.length ? ""
+    : '<div style="color:#6f7787">Избранного пока нет — нажмите ♥ на треке</div>';
+  for (const h of favs) el.musicFavs.appendChild(musicRow(h, "favorites"));
   el.musicList.innerHTML = list.length ? ""
     : '<div style="color:#6f7787">Пока ничего не играло</div>';
-  for (const h of list) {
-    const row = document.createElement("div");
-    row.style.cssText = "display:flex;align-items:center;gap:6px;padding:4px 0;" +
-      "border-bottom:1px solid #23262d";
-    const like = document.createElement("button");
-    like.textContent = h.liked ? "♥" : "♡";
-    like.title = h.liked ? "убрать из избранного" : "в избранное";
-    like.style.cssText = "background:none;border:none;cursor:pointer;font-size:16px;" +
-      "color:" + (h.liked ? "#e5534b" : "#6f7787");
-    like.onclick = () => send({ type: "music_like", id: h.id });
-    const play = document.createElement("button");
-    play.textContent = "▶";
-    play.title = "включить";
-    play.style.cssText = "background:none;border:none;cursor:pointer;color:#3fb950";
-    play.onclick = () => send({ type: "music_play", id: h.id });
-    const label = document.createElement("span");
-    label.innerHTML = (h.current ? "● " : "") + escapeHtml(h.title || "—");
-    label.title = h.title || "";
-    label.style.cssText = "flex:1;overflow:hidden;text-overflow:ellipsis;" +
-      "white-space:nowrap" + (h.current ? ";color:#3fb950" : "");
-    const src = document.createElement("span");
-    src.textContent = h.source === "local" ? "файл" : "youtube";
-    src.style.cssText = "color:#6f7787;font-size:11px";
-    row.append(like, play, label, src);
-    el.musicList.appendChild(row);
-  }
+  for (const h of list) el.musicList.appendChild(musicRow(h, "history"));
 }
+
+el.mFavPlay.onclick = () => send({ type: "music_favorites" });
 
 el.mToggle.onclick = () => send({ type: "music_control", action: "toggle" });
 el.mStop.onclick = () => send({ type: "music_control", action: "stop" });
