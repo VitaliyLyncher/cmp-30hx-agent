@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 """Проверка команды «скачай трек …» через живой WebSocket-сервис.
 
 Скачивает короткий CC-трек в реальную папку «Музыка», проверяет файл и запись
@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from pathlib import Path
 
 import websockets
