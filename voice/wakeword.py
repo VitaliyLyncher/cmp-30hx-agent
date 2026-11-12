@@ -20,20 +20,26 @@ _FRAME = 1280  # 80 мс при 16 кГц — стандартный шаг open
 
 
 class WakeWordDetector:
-    def __init__(self, model_names: list[str], threshold: float,
+    def __init__(self, model_names: list[str] | None = None, threshold: float = 0.5,
                  model_paths: list[str] | None = None):
         from openwakeword.model import Model  # тяжёлый импорт только при использовании
 
         self.threshold = float(threshold)
-        self._names = model_names
+        self._names = model_names or []
         self._buf = np.zeros(0, dtype=np.int16)
-        kwargs = {"inference_framework": "onnx"}
-        if model_paths:
-            self._model = Model(wakeword_models=model_paths, **kwargs)
-        else:
-            self._model = Model(wakeword_models=model_names, **kwargs)
-        log.info("wake word готов: %s (порог %.2f)",
-                 model_paths or model_names, self.threshold)
+        paths = list(model_paths or [])
+        if not paths:
+            # openWakeWord 0.4 принимает ТОЛЬКО пути к .onnx/.tflite, а не имена
+            try:
+                from openwakeword.utils import get_pretrained_model_paths
+                paths = list(get_pretrained_model_paths(self._names))
+            except Exception as e:  # noqa: BLE001
+                log.warning("не удалось получить пути моделей wake word: %s", e)
+                paths = []
+        if not paths:
+            raise RuntimeError("модели wake word не найдены")
+        self._model = Model(wakeword_model_paths=paths)
+        log.info("wake word готов: %s (порог %.2f)", paths, self.threshold)
 
     def feed(self, samples: np.ndarray) -> bool:
         """samples — float32 [-1..1]; True, если услышали ключевое слово."""

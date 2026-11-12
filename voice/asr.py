@@ -1,4 +1,4 @@
-﻿"""ASR: стриминговый sherpa-onnx (T-one CTC, русский) на CPU.
+"""ASR: стриминговый sherpa-onnx (T-one CTC, русский) на CPU.
 
 Свойства (раздел 7 ТЗ):
   * recognizer создаётся ОДИН раз за сеанс, на фразу — новый поток;
@@ -27,6 +27,10 @@ log = logging.getLogger("voice.asr")
 SAMPLE_RATE = 16000
 # ~20 с аудио (16 кГц × 2 байта × 100 мс = 3.2 КБ на кадр по 100 мс).
 ASR_QUEUE_MAX = 200
+
+# recognizer общий на процесс: сборка ~2 с, повторять её на каждую сессию дорого
+_RECOG = None
+_RECOG_LOCK = threading.Lock()
 
 
 class SessionASR:
@@ -63,52 +67,53 @@ class SessionASR:
 
     # -- жизненный цикл ---------------------------------------------------
     def _build(self):
-        import sherpa_onnx as so
+        # Recognizer дорогой (~2 с) и не зависит от сеанса: кэшируем на процесс,
+        # чтобы каждая новая WebSocket-сессия не платила заново.
+        global _RECOG
+        with _RECOG_LOCK:
+            if _RECOG is not None:
+                return _RECOG
+            import sherpa_onnx as so
 
-        model = self.model_dir / "model.onnx"
-        tokens = self.model_dir / "tokens.txt"
-        if not model.is_file() or not tokens.is_file():
-            raise FileNotFoundError(f"ASR-модель не найдена в {self.model_dir}")
-        t0 = time.monotonic()
-        rec = so.OnlineRecognizer.from_t_one_ctc(
-            tokens=str(tokens),
-            model=str(model),
-            num_threads=self.num_threads,
-            sample_rate=SAMPLE_RATE,
-            feature_dim=80,
-            enable_endpoint_detection=(self._endpoint_mode == "sherpa"),
-            rule1_min_trailing_silence=config.asr_silence_final(),
-            rule2_min_trailing_silence=config.asr_silence_after_text(),
-            rule3_min_utterance_length=config.asr_max_utterance(),
-            decoding_method="greedy_search",
-            provider="cpu",
-        )
-        log.info("ASR recognizer собран за %.0f мс (%s)", (time.monotonic() - t0) * 1000, self.model_dir)
-        return rec
+            model = self.model_dir / "model.onnx"
+            tokens = self.model_dir / "tokens.txt"
+            if not model.is_file() or not tokens.is_file():
+                raise FileNotFoundError(f"ASR-модель не найдена в {self.model_dir}")
+            t0 = time.monotonic()
+            _RECOG = so.OnlineRecognizer.from_t_one_ctc(
+                tokens=str(tokens),
+                model=str(model),
+                num_threads=self.num_threads,
+                sample_rate=SAMPLE_RATE,
+                feature_dim=80,
+                enable_endpoint_detection=(self._endpoint_mode == "sherpa"),
+                rule1_min_trailing_silence=config.asr_silence_final(),
+                rule2_min_trailing_silence=config.asr_silence_after_text(),
+                rule3_min_utterance_length=config.asr_max_utterance(),
+                decoding_method="greedy_search",
+                provider="cpu",
+            )
+            log.info("ASR recognizer собран за %.0f мс (%s)",
+                     (time.monotonic() - t0) * 1000, self.model_dir)
+            return _RECOG
 
     def start(self, on_event) -> None:
         """on_event(dict) вызывается из рабочего потока; публикуем в loop."""
         self._on_event = on_event
         self._loop = asyncio.get_running_loop()
-        if self._recognizer is None:
-            self._recognizer = self._build()
-        self._new_stream()
         self._running = True
+        # Сборку recognizer'а и создание стрима делает воркер: иначе первый
+        # клиент блокирует event loop на ~2 с (и это съедает начало речи).
         self._thread = threading.Thread(target=self._worker, name="asr-worker", daemon=True)
         self._thread.start()
-        log.info("ASR-воркер запущен (endpoint=%s, vad_rms=%.3f)",
+        log.info("ASR-воркер запускается (endpoint=%s, vad_rms=%.3f)",
                  self._endpoint_mode, config.vad_rms())
 
     def _new_stream(self) -> None:
-        assert self._recognizer is not None
-        self._stream = self._recognizer.create_stream()
-        # прогрев лидирующей тишиной: иначе в начале фразы фантомный токен
-        lead = int(config.asr_lead_silence() * SAMPLE_RATE)
-        self._stream.accept_waveform(SAMPLE_RATE, np.zeros(lead, dtype=np.float32))
-        self._last_text = ""
-        self._utterance_ms = 0.0
-        self._t_speech_start = None
-        self._silence_since = None
+        if self._recognizer is None:
+            return
+        with self._lock:
+            self._new_stream_locked()
 
     def reset_stream(self) -> None:
         """Сброс потока между фразами. Сам recognizer НЕ пересоздаётся."""
@@ -226,7 +231,14 @@ class SessionASR:
         self._silence_since = None
 
     def _worker(self) -> None:
-        assert self._stream is not None
+        try:
+            self._recognizer = self._build()
+        except Exception as e:  # noqa: BLE001
+            log.error("ASR init: %s", e)
+            return
+        with self._lock:
+            self._new_stream_locked()
+        log.info("ASR-воркер готов (endpoint=%s)", self._endpoint_mode)
         while self._running:
             try:
                 chunk = self._queue.get(timeout=0.1)
