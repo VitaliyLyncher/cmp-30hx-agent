@@ -1,4 +1,4 @@
-"""Конфигурация: свой парсер .env без внешних зависимостей.
+﻿"""Конфигурация: свой парсер .env без внешних зависимостей.
 
 Порядок поиска .env: явный путь из VOICE_ENV_FILE -> .env в корне проекта ->
 .env рядом с приложением. Уже заданные переменные НЕ перезаписываются
@@ -179,17 +179,17 @@ def asr_tail_silence() -> float: return f("ASR_TAIL_SILENCE", 1.0)
 # smart — адаптивная пауза по завершённости фразы (voice/turn.py);
 # sherpa — прежнее поведение (фиксированные пороги sherpa-onnx).
 def asr_endpoint_mode() -> str: return s("ASR_ENDPOINT", "smart").strip().lower()
-def turn_min_ms() -> float: return f("TURN_MIN_MS", 450)
-def turn_default_ms() -> float: return f("TURN_DEFAULT_MS", 700)
-def turn_question_ms() -> float: return f("TURN_QUESTION_MS", 600)
-def turn_dangling_ms() -> float: return f("TURN_DANGLING_MS", 1400)
-def turn_short_ms() -> float: return f("TURN_SHORT_MS", 900)
+def turn_min_ms() -> float: return f("TURN_MIN_MS", 350)
+def turn_default_ms() -> float: return f("TURN_DEFAULT_MS", 600)
+def turn_question_ms() -> float: return f("TURN_QUESTION_MS", 500)
+def turn_dangling_ms() -> float: return f("TURN_DANGLING_MS", 1200)
+def turn_short_ms() -> float: return f("TURN_SHORT_MS", 800)
 def turn_max_ms() -> float: return f("TURN_MAX_MS", 2500)
 
 # --- VAD для перебивания и детекции речи -------------------------------------
 # RMS по 16-битному PCM (0..1). Ниже — тише, выше — речь.
 def vad_rms() -> float: return f("VAD_RMS", 0.03)
-def vad_hangover_ms() -> float: return f("VAD_HANGOVER_MS", 500)
+def vad_hangover_ms() -> float: return f("VAD_HANGOVER_MS", 350)
 
 # --- Wake word (openWakeWord) ------------------------------------------------
 def wakeword_enabled() -> bool: return b("WAKEWORD_ENABLED", False)
