@@ -1,0 +1,56 @@
+# docker-compose.yml — «одна команда» для cmp-voice.
+#
+# Перед запуском (один раз) соберите на хосте:
+#   bash scripts/build_llama.sh        # или ручная сборка форка prisma
+#   bash scripts/build_daemon.sh
+# и скачайте модели (README, раздел «Модели»).
+#
+# Затем:
+#   cp docker/.env.example docker/.env   # поправить пути хоста
+#   docker compose -f docker/docker-compose.yml up -d --build
+#   curl http://localhost:8110/health
+#
+# Важно: образ НЕ содержит модели и собранный llama.cpp — они монтируются
+# с хоста (быстро собирать и легко обновлять).
+services:
+  cmp-voice:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: cmp-voice:local
+    container_name: cmp-voice
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8110:8110"
+    env_file:
+      - .env
+    environment:
+      # внутри контейнера сервис должен слушать все интерфейсы (порт публикуется)
+      VOICE_HOST: 0.0.0.0
+      TTS_KOKORO_DIR: /app/models/kokoro-ru-fp32
+      BONSAI_MODEL: /models/bonsai9/PQ2_0.gguf
+      ASR_MODEL_DIR: /app/tone_asr/sherpa-onnx-streaming-t-one-russian-2025-09-08
+      SILERO_MODEL: /app/models/silero/v5_6_ru.pt
+    volumes:
+      # модели
+      - "${CMP_MODELS_DIR:?путь к ~/models}:/models:ro"
+      - "${CMP_ASR_DIR:?путь к ~/tone_asr}:/app/tone_asr:ro"
+      - "${CMP_TTS_MODELS:?путь к ~/cmp-voice/models}:/app/models:ro"
+      # собранные библиотеки форка и сам демон
+      - "${CMP_LLAMA_BUILD:?путь к src/llama-prism/build}:/app/src/llama-prism/build:ro"
+      - "${CMP_DAEMON:?путь к daemon/bonsai_daemon}:/app/daemon/bonsai_daemon:ro"
+      # конфиг (тот же .env, что для systemd — монтируем только чтение)
+      - "${CMP_ENV:?путь к .env}:/app/.env:ro"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8110/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 90s
