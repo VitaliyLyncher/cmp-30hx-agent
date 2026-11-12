@@ -331,12 +331,22 @@ class Session:
             self.tts_task = None
 
     # -- wake word (режим asr) ---------------------------------------------
-    @staticmethod
-    def _match_wake(text: str) -> tuple[bool, str]:
-        """Есть ли в тексте ключевая фраза. Возвращает (нашли, остаток)."""
+    # ASR иногда путает похожие буквы в редком слове («джарвис» -> «джарвиз»),
+    # поэтому ключевые слова ищем «нечётко»: частые пары букв — вариантами.
+    _WAKE_FUZZY = {
+        "с": "[сз]", "з": "[сз]", "и": "[иы]", "й": "[йи]", "в": "[вб]",
+        "д": "[дт]", "т": "[дт]", "к": "[кг]", "г": "[кг]", "п": "[пб]",
+        "б": "[бп]", "ф": "[фв]", "ш": "[шж]", "ж": "[жш]", "ц": "[цч]",
+        "ч": "[чц]", "э": "[эе]", "е": "[еэ]",
+    }
+
+    @classmethod
+    def _match_wake(cls, text: str) -> tuple[bool, str]:
+        """Есть ли в тексте ключевая фраза (с учётом ошибок ASR)."""
         low = (text or "").lower()
         for phrase in config.wakeword_phrases():
-            m = re.search(r"\b" + re.escape(phrase) + r"\b[\s,.!?—-]*", low)
+            pat = "".join(cls._WAKE_FUZZY.get(ch, re.escape(ch)) for ch in phrase)
+            m = re.search(r"(?<!\w)" + pat + r"(?!\w)", low)
             if m:
                 return True, (text[:m.start()] + " " + text[m.end():]).strip()
         return False, text or ""
