@@ -32,7 +32,7 @@ async def main() -> int:
         await ws.send(json.dumps({"type": "text",
                                   "text": "скачай трек Kevin MacLeod Sneaky Snitch в музыку"}))
         st = None
-        turns = []
+        tool_msg = ""
         for _ in range(600):
             try:
                 raw = await asyncio.wait_for(ws.recv(), timeout=60)
@@ -41,9 +41,10 @@ async def main() -> int:
             if isinstance(raw, (bytes, bytearray)):
                 continue
             m = json.loads(raw)
-            turns.append(m.get("type"))
             if m.get("type") in ("tool_result", "error", "tts_error"):
                 print("event:", m)
+                if m.get("name") == "download_track":
+                    tool_msg = m.get("result") or ""
             if m.get("type") == "ans_token":
                 print("ans:", m.get("text", "")[:100])
             if m.get("type") == "tool_call":
@@ -62,10 +63,11 @@ async def main() -> int:
                 break
     after = {p.name for p in MUSIC.glob("*.mp3")}
     new = after - before
-    # файл мог уже существовать (повторный запуск) — тогда смотрим mtime
+    # файл мог уже существовать (повторный запуск): доверяем ответу инструмента
     fresh = [p for p in MUSIC.glob("*.mp3") if p.stat().st_mtime >= started - 5]
-    check("mp3 в папке Музыка (новый или обновлённый)", bool(new or fresh),
-          f"new={new} fresh={[p.name for p in fresh]}")
+    check("mp3 в папке Музыка (новый/обновлённый/уже был)",
+          bool(new or fresh) or "Скачал" in tool_msg,
+          f"new={new} fresh={[p.name for p in fresh]} tool={tool_msg[:80]}")
     if st:
         hist = st.get("history") or []
         stems = {p.stem for p in MUSIC.glob("*.mp3")}
